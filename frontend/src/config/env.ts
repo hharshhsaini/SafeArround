@@ -29,7 +29,7 @@ export const GOOGLE_MAPS_API_KEY = normalizeOptionalConfig(process.env.EXPO_PUBL
 
 // Development WebSocket URL candidates for auto-discovery
 export const DEV_WS_URL_CANDIDATES = __DEV__ ? [
-  `ws://192.168.0.130:8001/ws/crime`,
+  `ws://10.19.11.176:8001/ws/crime`,
   `ws://${getDevHost()}:8001/ws/crime`,
   `ws://localhost:8001/ws/crime`,
   `ws://10.0.2.2:8001/ws/crime`,

@@ -45,6 +45,7 @@ func (h *HeatmapHandler) GetHeatmapData(c *gin.Context) {
             ST_Y(location::geometry) as latitude,
             ST_X(location::geometry) as longitude,
             occurred_at,
+            location_name,
             GREATEST(0.0, 
                 CASE severity 
                     WHEN 4 THEN 100.0 
@@ -61,16 +62,26 @@ func (h *HeatmapHandler) GetHeatmapData(c *gin.Context) {
                 END)
             ) as weight_pct
         FROM crime_incidents
-        WHERE ST_Within(
+        WHERE ST_Intersects(
             location::geometry,
-            ST_MakeEnvelope(?, ?, ?, ?, 4326)
+            ST_MakeEnvelope($1, $2, $3, $4, 4326)
         )
-        AND occurred_at > NOW() - INTERVAL '30 days'
-        LIMIT 10000
+        AND occurred_at > NOW() - INTERVAL '90 days'
+        ORDER BY severity DESC, occurred_at DESC
+        LIMIT 5000
     `
 
 	var crimes []map[string]interface{}
-	h.db.Raw(query, west, south, east, north).Scan(&crimes)
+	result := h.db.Raw(query, west, south, east, north).Scan(&crimes)
+	
+	if result.Error != nil {
+		c.JSON(500, gin.H{
+			"success": false,
+			"error":   "Failed to fetch crime data",
+			"message": result.Error.Error(),
+		})
+		return
+	}
 
 	c.JSON(200, gin.H{
 		"success": true,

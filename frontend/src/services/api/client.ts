@@ -48,9 +48,14 @@ apiClient.interceptors.response.use(
         }
         
         return apiClient(originalRequest);
-      } catch (refreshError) {
+      } catch (refreshError: any) {
+        // Silently handle 401 refresh failures (expired tokens on startup)
+        const is401 = refreshError?.response?.status === 401;
+        if (!is401) {
+          console.error('Token refresh failed:', refreshError);
+        }
         const { useAuthStore } = require('@/store/authStore');
-        useAuthStore.getState().logOut();
+        useAuthStore.getState().setError(null); // Don't show error to user
         return Promise.reject(refreshError);
       }
     }

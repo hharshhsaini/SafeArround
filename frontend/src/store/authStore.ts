@@ -13,7 +13,7 @@ const KEYS = {
 
 // Bump this number whenever you want to force-clear old sessions
 // (e.g. after major auth changes, schema updates, etc.)
-const AUTH_VERSION = '3';
+const AUTH_VERSION = '4';
 
 
 interface AuthState {
@@ -146,11 +146,16 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       if (!currentRefreshToken) throw new Error('No refresh token');
       const tokens = await authService.refreshToken(currentRefreshToken);
       get().setTokens(tokens.access, tokens.refresh);
-    } catch (err) {
-      if (get().isAuthenticated) {
+    } catch (err: any) {
+      // Silently handle 401 errors (expired/invalid tokens) during app startup
+      const is401 = err?.response?.status === 401;
+      if (!is401 && get().isAuthenticated) {
         console.error('Token refresh failed:', err);
       }
-      get().logOut();
+      // Clear auth state silently for expired tokens
+      set({ user: null, accessToken: null, refreshToken: null, isAuthenticated: false });
+      await AsyncStorage.multiRemove([KEYS.user, KEYS.accessToken, KEYS.refreshToken]);
+      throw err;
     }
   },
 

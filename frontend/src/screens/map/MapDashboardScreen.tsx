@@ -7,6 +7,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { HeatmapLayer } from '@/components/map/HeatmapLayer';
 import { UserLocationMarker } from '@/components/map/UserLocationMarker';
 import { DangerZoneMarker } from '@/components/map/DangerZoneMarker';
+import { LocationNameOverlay } from '@/components/map/LocationNameOverlay';
 import { CurrentLocationButton } from '@/components/map/CurrentLocationButton';
 import { QuickStatsCard } from '@/components/map/QuickStatsCard';
 import { MapSearchBar } from '@/components/map/MapSearchBar';
@@ -54,6 +55,7 @@ export const MapDashboardScreen = () => {
   const [showDangerAlert, setShowDangerAlert] = useState(false);
   const [liveNearbyUsers, setLiveNearbyUsers] = useState(0);
   const [selectedPlace, setSelectedPlace] = useState<{ name: string; location: { latitude: number; longitude: number } } | null>(null);
+  const [crimeLocationNames, setCrimeLocationNames] = useState<Array<{ name: string; latitude: number; longitude: number; severity?: number }>>([]);
   const [mapBounds, setMapBounds] = useState({
     north: 0,
     south: 0,
@@ -264,7 +266,10 @@ export const MapDashboardScreen = () => {
           key={`heatmap-${heatmapKey}`}
           mapRef={mapRef as React.RefObject<MapView>}
           bounds={mapBounds}
+          onLocationNamesLoaded={setCrimeLocationNames}
         />
+        
+        {/* Location name markers removed - heatmap provides visual indication */}
         
         {currentLocation && (
           <>

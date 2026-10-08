@@ -7,6 +7,7 @@ interface HeatmapPoint {
   latitude: number;
   longitude: number;
   weight: number;
+  location_name?: string;
 }
 
 interface Props {
@@ -18,9 +19,10 @@ interface Props {
     west: number;
   };
   onCrimeDataLoaded?: (count: number) => void;
+  onLocationNamesLoaded?: (locations: Array<{ name: string; latitude: number; longitude: number; severity?: number }>) => void;
 }
 
-export default function CrimeHeatmapOverlay({ bounds, onCrimeDataLoaded }: Props) {
+export default function CrimeHeatmapOverlay({ bounds, onCrimeDataLoaded, onLocationNamesLoaded }: Props) {
   const [heatmapPoints, setHeatmapPoints] = useState<HeatmapPoint[]>([]);
 
   useEffect(() => {
@@ -33,6 +35,9 @@ export default function CrimeHeatmapOverlay({ bounds, onCrimeDataLoaded }: Props
     try {
       const crimeData = await heatmapService.getCrimeData(bounds);
       
+      // Extract unique location names for display
+      const locationMap = new Map<string, { name: string; latitude: number; longitude: number; severity: number }>();
+      
       // Convert to heatmap points with dynamic time-decay weights
       const points: HeatmapPoint[] = crimeData.map(crime => {
         // AI Time Decay: Use dynamic weight_pct (0-100) if available, else fallback to severity
@@ -40,15 +45,35 @@ export default function CrimeHeatmapOverlay({ bounds, onCrimeDataLoaded }: Props
           ? Math.max(0.1, crime.weight_pct / 100.0) // Floor at 0.1 so even old crimes show faintly
           : (crime.severity || 1) / 4.0;
 
+        // Track location names with highest severity at each location
+        if (crime.location_name) {
+          const key = `${crime.latitude.toFixed(2)},${crime.longitude.toFixed(2)}`;
+          const existing = locationMap.get(key);
+          if (!existing || (crime.severity || 0) > existing.severity) {
+            locationMap.set(key, {
+              name: crime.location_name,
+              latitude: crime.latitude,
+              longitude: crime.longitude,
+              severity: crime.severity || 1,
+            });
+          }
+        }
+
         return {
           latitude: crime.latitude,
           longitude: crime.longitude,
           weight: normalizedWeight,
+          location_name: crime.location_name,
         };
       });
 
       setHeatmapPoints(points);
       onCrimeDataLoaded?.(points.length);
+      
+      // Pass location names to parent for display
+      if (onLocationNamesLoaded) {
+        onLocationNamesLoaded(Array.from(locationMap.values()));
+      }
     } catch (error) {
       console.error('Failed to load heatmap data:', error);
     }
@@ -99,7 +124,8 @@ export default function CrimeHeatmapOverlay({ bounds, onCrimeDataLoaded }: Props
       {heatmapPoints.flatMap((point, idx) => {
         const weight = point.weight || 0.1;
         const baseRadius = 2500 * (weight + 0.3);
-        const pointKey = `crime-${point.latitude}-${point.longitude}-${idx}`;
+        // Use index and timestamp to ensure unique keys even for duplicate coordinates
+        const pointKey = `crime-${idx}-${point.latitude.toFixed(6)}-${point.longitude.toFixed(6)}-${Date.now()}`;
 
         return [
           <Circle
