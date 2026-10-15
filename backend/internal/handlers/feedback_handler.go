@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 
@@ -67,7 +68,16 @@ func (h *FeedbackHandler) SubmitFeedback(c *gin.Context) {
 	}
 
 	if err := h.feedbackService.SubmitFeedback(feedback); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to submit feedback"})
+		switch {
+		case errors.Is(err, services.ErrFeedbackNotAllowed):
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		case errors.Is(err, services.ErrNotAResponder):
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		case errors.Is(err, services.ErrAlreadyRated):
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to submit feedback"})
+		}
 		return
 	}
 
@@ -86,7 +96,11 @@ func (h *FeedbackHandler) GetUserRatings(c *gin.Context) {
 		return
 	}
 
-	stats, err := h.feedbackService.GetUserRatingStats(uint(userID))
+	// Anyone may see the totals; individual feedback is for the rated user only.
+	callerID, _ := c.Get("user_id")
+	includeRecent := callerID == uint(userID)
+
+	stats, err := h.feedbackService.GetUserRatingStats(uint(userID), includeRecent)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 		return

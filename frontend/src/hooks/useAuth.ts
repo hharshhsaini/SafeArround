@@ -16,24 +16,23 @@ export const useAuth = () => {
     verifyOTP,
     setupProfile,
     logIn,
+    resetPassword,
     logOut,
     refreshAccessToken,
-    loadPersistedAuth,
     clearError,
     setError,
   } = useAuthStore();
 
-  // Load persisted auth on mount
-  useEffect(() => {
-    loadPersistedAuth();
-  }, []);
+  // Persisted auth is loaded once at startup by initializeApp; loading it again
+  // from every screen that uses this hook raced with in-flight token refreshes.
 
   // Auto-refresh token every 50 minutes (tokens expire in ~60-168 min)
   useEffect(() => {
     if (!isAuthenticated || !accessToken) return;
 
     const refreshInterval = setInterval(() => {
-      refreshAccessToken();
+      // Failures are handled inside refreshAccessToken.
+      refreshAccessToken().catch(() => undefined);
     }, 50 * 60 * 1000);
 
     return () => clearInterval(refreshInterval);
@@ -51,6 +50,7 @@ export const useAuth = () => {
     setupProfile,
     // Direct login with phone + password
     logIn,
+    resetPassword,
     logOut,
     clearError,
     setError,

@@ -1,25 +1,20 @@
 package middleware
 
 import (
-	"fmt"
+	"log"
 	"net/http"
-	"os"
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/golang-jwt/jwt/v5"
+	"github.com/obsidiannnn/Safe-Around/backend/internal/utils"
+	"github.com/redis/go-redis/v9"
 )
 
-// Claims holds the JWT payload we embed in every token.
-type Claims struct {
-	UserID uint   `json:"user_id"`
-	Email  string `json:"email"`
-	jwt.RegisteredClaims
-}
-
-// AuthRequired validates the Bearer JWT token on every protected route.
+// AuthRequired validates the Bearer access token on every protected route.
+// Refresh tokens are rejected, and so are access tokens revoked at logout
+// (checked in rdb when it is non-nil).
 // It sets "user_id" and "user_email" in the Gin context for downstream handlers.
-func AuthRequired() gin.HandlerFunc {
+func AuthRequired(rdb *redis.Client) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
 		if authHeader == "" {
@@ -37,20 +32,7 @@ func AuthRequired() gin.HandlerFunc {
 			return
 		}
 
-		tokenString := parts[1]
-		secret := []byte(os.Getenv("JWT_SECRET"))
-
-		token, err := jwt.ParseWithClaims(tokenString, &Claims{},
-			func(t *jwt.Token) (interface{}, error) {
-				// Guard against algorithm confusion attacks:
-				// reject any token not signed with HMAC.
-				if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-					return nil, fmt.Errorf("unexpected signing algorithm: %v", t.Header["alg"])
-				}
-				return secret, nil
-			},
-		)
-
+		claims, err := utils.ValidateAccessToken(parts[1])
 		if err != nil {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"error": "Invalid or expired token",
@@ -58,19 +40,25 @@ func AuthRequired() gin.HandlerFunc {
 			return
 		}
 
-		if !token.Valid {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"error": "Token is not valid",
-			})
-			return
-		}
-
-		claims, ok := token.Claims.(*Claims)
-		if !ok || claims.UserID == 0 {
+		if claims.UserID == 0 {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"error": "Invalid token claims",
 			})
 			return
+		}
+
+		if rdb != nil && claims.ID != "" {
+			revoked, err := rdb.Exists(c.Request.Context(), utils.RevokedAccessTokenKey(claims.ID)).Result()
+			if err != nil {
+				// Fail open like the rate limiter: a Redis outage must not block
+				// SOS requests, and revoked access tokens expire within 15 minutes.
+				log.Printf("revoked token check failed: %v", err)
+			} else if revoked > 0 {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+					"error": "Token has been revoked",
+				})
+				return
+			}
 		}
 
 		c.Set("user_id", claims.UserID)

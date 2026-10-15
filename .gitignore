@@ -18,8 +18,14 @@ frontend/.env
 
 # Go build outputs
 backend/safearound-api
+backend/api
+backend/worker
 backend/*.exe
 backend/bin/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
 
 # Secrets and keys
 *.key

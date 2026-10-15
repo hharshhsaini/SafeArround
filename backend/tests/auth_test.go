@@ -90,7 +90,7 @@ func setupRouter() *gin.Engine {
 
 	h := handlers.NewAuthHandler(mockRepo, nil, rdb, twClient)
 	api := r.Group("/api/v1")
-	routes.SetupAuthRoutes(api, h)
+	routes.SetupAuthRoutes(api, h, rdb)
 
 	return r
 }
@@ -137,6 +137,8 @@ func TestSendOTP(t *testing.T) {
 }
 
 func TestTokenValidation(t *testing.T) {
+	t.Setenv("JWT_SECRET", "token-validation-secret")
+
 	token, err := utils.GenerateToken(1, "test@example.com")
 	assert.NoError(t, err)
 	assert.NotEmpty(t, token)

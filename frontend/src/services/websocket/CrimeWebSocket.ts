@@ -1,3 +1,13 @@
+import { useAuthStore } from '@/store/authStore';
+
+// React Native's WebSocket accepts request headers as a third argument, but the
+// DOM typings in Expo's tsconfig only describe the browser's two-argument form.
+type NativeWebSocketConstructor = new (
+  url: string,
+  protocols: string | string[] | null,
+  options: { headers: Record<string, string> },
+) => WebSocket;
+
 class CrimeWebSocketService {
   private socket: WebSocket | null = null;
   private listeners: Map<string, Function[]> = new Map();
@@ -15,15 +25,23 @@ class CrimeWebSocketService {
     }
     this.serverUrl = serverUrl;
     this.shouldReconnect = true;
+
+    // The server only accepts signed-in sockets. Read the token on every attempt
+    // so a reconnect uses the latest token the API client has refreshed.
+    const accessToken = useAuthStore.getState().accessToken;
+    if (!accessToken) {
+      this.scheduleReconnect();
+      return;
+    }
+
     try {
-      this.socket = new WebSocket(serverUrl);
+      this.socket = new (WebSocket as unknown as NativeWebSocketConstructor)(serverUrl, null, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
     } catch (error) {
       console.warn('Crime websocket could not be created right now; retry will happen later.', error);
       this.socket = null;
-      if (this.shouldReconnect) {
-        if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-        this.reconnectTimer = setTimeout(() => this.connect(this.serverUrl), 3000);
-      }
+      this.scheduleReconnect();
       return;
     }
 
@@ -34,9 +52,7 @@ class CrimeWebSocketService {
 
     this.socket.onclose = () => {
       console.log('❌ Disconnected from crime updates');
-      if (this.shouldReconnect) {
-        this.reconnectTimer = setTimeout(() => this.connect(this.serverUrl), 3000);
-      }
+      this.scheduleReconnect();
     };
 
     this.socket.onerror = (error) => {
@@ -54,6 +70,9 @@ class CrimeWebSocketService {
           case 'new_crime':
             this.emit('crime_added', eventData || payload);
             break;
+          case 'crime_batch':
+            this.emit('crime_batch', eventData || payload);
+            break;
           case 'emergency_alert':
             this.emit('emergency_alert', eventData);
             break;
@@ -62,9 +81,6 @@ class CrimeWebSocketService {
             break;
           case 'radius_expanded':
             this.emit('radius_expanded', eventData);
-            break;
-          case 'nearby_users_updated':
-            this.emit('nearby_users_updated', eventData);
             break;
           case 'connected':
             if (eventData) {
@@ -98,6 +114,14 @@ class CrimeWebSocketService {
         callbacks.splice(index, 1);
       }
     }
+  }
+
+  private scheduleReconnect() {
+    if (!this.shouldReconnect) {
+      return;
+    }
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = setTimeout(() => this.connect(this.serverUrl), 3000);
   }
 
   private emit(event: string, data: any) {

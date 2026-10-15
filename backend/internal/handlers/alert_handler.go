@@ -145,10 +145,16 @@ func (h *AlertHandler) RespondToAlert(c *gin.Context) {
 		switch {
 		case errors.Is(err, gorm.ErrRecordNotFound):
 			c.JSON(http.StatusNotFound, gin.H{"error": "Alert not found"})
-		case errors.Is(err, services.ErrAlertSelfResponse),
-			errors.Is(err, services.ErrAlertInactive),
-			errors.Is(err, services.ErrAlertAlreadyAccepted):
-			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		// The code lets the app tell a repeat accept (safe to carry on) from an
+		// alert it must not head to.
+		case errors.Is(err, services.ErrAlertAlreadyAccepted):
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error(), "code": "already_accepted"})
+		case errors.Is(err, services.ErrAlertInactive):
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error(), "code": "alert_inactive"})
+		case errors.Is(err, services.ErrAlertSelfResponse):
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error(), "code": "self_response"})
+		case errors.Is(err, services.ErrAlertNotDispatched):
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
 		default:
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to accept alert response"})
 		}
@@ -256,6 +262,13 @@ func (h *AlertHandler) UpdateAlertStatus(c *gin.Context) {
 
 // POST /api/v1/alerts/:id/escalate
 func (h *AlertHandler) EscalateAlert(c *gin.Context) {
+	userIDVal, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	userID := userIDVal.(uint)
+
 	alertIDStr := c.Param("id")
 	alertID, err := uuid.Parse(alertIDStr)
 	if err != nil {
@@ -272,19 +285,35 @@ func (h *AlertHandler) EscalateAlert(c *gin.Context) {
 		return
 	}
 
-	err = h.alertService.EscalateToEmergencyServices(alertID, req.EscalationType)
+	err = h.alertService.EscalateToEmergencyServices(alertID, userID, req.EscalationType)
 	if err != nil {
 		log.Printf("Escalation failed: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Emergency escalation dispatch failed"})
+		switch {
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": "Alert not found"})
+		case errors.Is(err, services.ErrAlertAccessDenied):
+			c.JSON(http.StatusForbidden, gin.H{"error": "Only the requester or an active responder can escalate this alert"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Emergency escalation dispatch failed"})
+		}
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "Alert escalated to formal emergency services"})
+	c.JSON(http.StatusOK, gin.H{
+		"message":          "Escalation recorded and emergency contacts alerted. SafeAround cannot contact emergency services for you: call 112 now.",
+		"emergency_number": "112",
+	})
 }
 
 // GET    /api/v1/alerts/active
 func (h *AlertHandler) GetActiveAlerts(c *gin.Context) {
-	alerts, err := h.alertService.GetActiveAlerts(c.Request.Context())
+	userIDVal, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	alerts, err := h.alertService.GetActiveAlerts(c.Request.Context(), userIDVal.(uint))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch active alerts"})
 		return

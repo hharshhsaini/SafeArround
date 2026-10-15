@@ -13,15 +13,22 @@ import { colors } from '@/theme/colors';
 import { spacing } from '@/theme/spacing';
 import { fontSizes } from '@/theme/typography';
 import { profileApiService } from '@/services/api/profileApiService';
+import { DeviceContactsPickerModal } from '@/components/profile/DeviceContactsPickerModal';
+import { DeviceContactOption } from '@/services/deviceContactsService';
+import { normalizePhoneNumber } from '@/utils/phone';
+
+const MAX_CONTACTS = 5;
 
 /**
  * Emergency contacts setup screen
- * Allows adding 1-5 emergency contacts during onboarding
+ * Allows adding 1-5 emergency contacts during onboarding, typed in or chosen
+ * from the phone's contacts
  */
 export const EmergencyContactsScreen = () => {
   const navigation = useNavigation();
   const [contacts, setContacts] = useState<EmergencyContact[]>([]);
   const [showForm, setShowForm] = useState(false);
+  const [showPicker, setShowPicker] = useState(false);
   const [isPrimary, setIsPrimary] = useState(false);
 
   const {
@@ -33,8 +40,24 @@ export const EmergencyContactsScreen = () => {
     resolver: zodResolver(emergencyContactSchema),
   });
 
+  const onImportContacts = (selected: DeviceContactOption[]) => {
+    const imported: EmergencyContact[] = selected
+      .slice(0, MAX_CONTACTS - contacts.length)
+      .map((contact, index) => ({
+        id: Date.now() + index,
+        userId: 0,
+        name: contact.name,
+        phoneNumber: contact.normalizedPhone,
+        phone: contact.normalizedPhone,
+        relationship: 'Trusted contact',
+        isPrimary: contacts.length === 0 && index === 0,
+        createdAt: new Date().toISOString(),
+      }));
+    setContacts([...contacts, ...imported]);
+  };
+
   const onAddContact = (data: EmergencyContactFormData) => {
-    if (contacts.length >= 5) {
+    if (contacts.length >= MAX_CONTACTS) {
       return;
     }
 
@@ -60,21 +83,33 @@ export const EmergencyContactsScreen = () => {
   };
 
   const handleContinue = async () => {
-    try {
-      // Save contacts to backend
-      for (const contact of contacts) {
+    // Save contacts to backend. A 409 means the contact was already saved by
+    // an earlier attempt, so retrying after a partial failure is safe.
+    const failed: string[] = [];
+    for (const contact of contacts) {
+      try {
         await profileApiService.addContact({
           name: contact.name,
           phone: contact.phoneNumber,
           relationship: contact.relationship,
           is_priority: contact.isPrimary,
         });
+      } catch (error: any) {
+        if (error?.response?.status !== 409) {
+          console.error('Failed to save contact:', error);
+          failed.push(contact.name);
+        }
       }
-      navigation.navigate('OnboardingTutorial' as never);
-    } catch (error) {
-      console.error('Failed to save contacts:', error);
-      RNAlert.alert('Error', 'Failed to save emergency contacts. Please try again.');
     }
+
+    if (failed.length > 0) {
+      RNAlert.alert(
+        'Error',
+        `Failed to save: ${failed.join(', ')}. Check the number and try again.`
+      );
+      return;
+    }
+    navigation.navigate('OnboardingTutorial' as never);
   };
 
   const handleSkip = () => {
@@ -203,17 +238,29 @@ export const EmergencyContactsScreen = () => {
         </Card>
       )}
 
-        {!showForm && contacts.length < 5 && (
-        <Button
-          variant="outline"
-          size="large"
-          fullWidth
-          icon="add"
-          onPress={() => setShowForm(true)}
-          style={styles.addButton}
-        >
-          Add Contact
-        </Button>
+        {!showForm && contacts.length < MAX_CONTACTS && (
+        <>
+          <Button
+            variant="outline"
+            size="large"
+            fullWidth
+            icon="contacts"
+            onPress={() => setShowPicker(true)}
+            style={styles.addButton}
+          >
+            Choose from Phone Contacts
+          </Button>
+          <Button
+            variant="ghost"
+            size="large"
+            fullWidth
+            icon="add"
+            onPress={() => setShowForm(true)}
+            style={styles.addButton}
+          >
+            Type a Number Instead
+          </Button>
+        </>
       )}
 
         <View style={styles.footer}>
@@ -237,6 +284,14 @@ export const EmergencyContactsScreen = () => {
         </Button>
         </View>
       </ScrollView>
+
+      <DeviceContactsPickerModal
+        visible={showPicker}
+        existingPhones={contacts.map((contact) => normalizePhoneNumber(contact.phoneNumber || contact.phone || ''))}
+        maxSelectable={MAX_CONTACTS - contacts.length}
+        onClose={() => setShowPicker(false)}
+        onImport={onImportContacts}
+      />
     </SafeAreaView>
   );
 };

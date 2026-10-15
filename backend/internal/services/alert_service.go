@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sync"
 	"time"
 
@@ -40,6 +41,7 @@ var (
 	ErrAlertInactive        = errors.New("alert is no longer active")
 	ErrAlertAlreadyAccepted = errors.New("responder has already accepted this alert")
 	ErrAlertAccessDenied    = errors.New("you can only manage your own alert")
+	ErrAlertNotDispatched   = errors.New("this alert was not sent to you")
 )
 
 type AlertResponderSummary struct {
@@ -109,12 +111,50 @@ func (s *AlertService) GetOwnedAlert(ctx context.Context, alertID uuid.UUID, use
 	return &alert, nil
 }
 
-func (s *AlertService) GetActiveAlerts(ctx context.Context) ([]models.EmergencyAlert, error) {
+// GetActiveAlerts returns the open alerts userID is involved in: their own,
+// ones that reached them (dispatched, or as an emergency contact of the
+// requester), and ones they are responding to.
+func (s *AlertService) GetActiveAlerts(ctx context.Context, userID uint) ([]models.EmergencyAlert, error) {
 	var alerts []models.EmergencyAlert
-	if err := s.db.Where("alert_status IN ?", []string{"active", "responding"}).Order("created_at DESC").Find(&alerts).Error; err != nil {
+	if err := s.db.WithContext(ctx).Where("alert_status IN ?", []string{"active", "responding"}).Order("created_at DESC").Find(&alerts).Error; err != nil {
 		return nil, err
 	}
-	return alerts, nil
+	if len(alerts) == 0 {
+		return alerts, nil
+	}
+
+	alertIDs := make([]uuid.UUID, 0, len(alerts))
+	for _, alert := range alerts {
+		alertIDs = append(alertIDs, alert.ID)
+	}
+
+	dispatched, err := s.dispatchedUserIDs(ctx, alertIDs)
+	if err != nil {
+		return nil, err
+	}
+	contactOwners, err := s.emergencyContactOwnerIDs(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	var respondingTo []uuid.UUID
+	if err := s.db.WithContext(ctx).
+		Model(&models.AlertResponse{}).
+		Where("alert_id IN ? AND responder_user_id = ?", alertIDs, userID).
+		Pluck("alert_id", &respondingTo).Error; err != nil {
+		return nil, err
+	}
+
+	visible := make([]models.EmergencyAlert, 0, len(alerts))
+	for _, alert := range alerts {
+		_, isContact := contactOwners[alert.UserID]
+		if alert.UserID == userID ||
+			isContact ||
+			slices.Contains(dispatched[alert.ID], userID) ||
+			slices.Contains(respondingTo, alert.ID) {
+			visible = append(visible, alert)
+		}
+	}
+	return visible, nil
 }
 
 func (s *AlertService) GetAlertDetails(ctx context.Context, alertID uuid.UUID, userID uint) (*AlertDetails, error) {
@@ -262,7 +302,8 @@ func (s *AlertService) CreateAlert(ctx context.Context, req CreateAlertRequest) 
 
 	// 4. Log timeline event
 	s.logTimelineEvent(alert.ID, "created", 100, usersNotified, 0, map[string]interface{}{
-		"requester_user_id": req.UserID,
+		"requester_user_id":  req.UserID,
+		"recipient_user_ids": recipientIDs,
 	})
 
 	// 5. Start radius expansion scheduler
@@ -414,6 +455,14 @@ func (s *AlertService) AcceptAlert(ctx context.Context, alertID uuid.UUID, respo
 		return ErrAlertInactive
 	}
 
+	askedToHelp, err := s.wasAskedToHelp(ctx, alert, responderID)
+	if err != nil {
+		return err
+	}
+	if !askedToHelp {
+		return ErrAlertNotDispatched
+	}
+
 	var existingResponse models.AlertResponse
 	if err := s.db.Where("alert_id = ? AND responder_user_id = ? AND response_status IN ?", alertID, responderID, []string{"accepted", "arrived", "helping"}).
 		First(&existingResponse).Error; err == nil {
@@ -438,9 +487,6 @@ func (s *AlertService) AcceptAlert(ctx context.Context, alertID uuid.UUID, respo
 	if err := s.db.Create(response).Error; err != nil {
 		return err
 	}
-	s.db.Model(&models.User{}).
-		Where("id = ?", responderID).
-		UpdateColumn("people_helped_count", gorm.Expr("people_helped_count + ?", 1))
 
 	// Update alert status
 	s.db.Model(&models.EmergencyAlert{}).
@@ -497,6 +543,20 @@ func (s *AlertService) ResolveAlert(ctx context.Context, alertID uuid.UUID, reso
 		return err
 	}
 
+	// Credit responders only once the requester marks the alert resolved, not
+	// when they accept; this runs once because a resolved alert returns early.
+	var responderIDs []uint
+	s.db.WithContext(ctx).
+		Model(&models.AlertResponse{}).
+		Where("alert_id = ? AND response_status IN ?", alertID, []string{"accepted", "arrived", "helping"}).
+		Pluck("responder_user_id", &responderIDs)
+	if len(responderIDs) > 0 {
+		s.db.WithContext(ctx).
+			Model(&models.User{}).
+			Where("id IN ?", responderIDs).
+			UpdateColumn("people_helped_count", gorm.Expr("people_helped_count + ?", 1))
+	}
+
 	// Cancel any pending expansions
 	s.cancelRadiusExpansion(alertID)
 
@@ -511,7 +571,7 @@ func (s *AlertService) ResolveAlert(ctx context.Context, alertID uuid.UUID, reso
 
 	// Close WebSocket room
 	if s.websocketHub != nil {
-		s.websocketHub.CloseRoom("alert_"+alertID.String(), "resolved")
+		s.websocketHub.CloseRoom("alert_"+alertID.String(), "resolved", s.alertParticipantIDs(ctx, alert))
 	}
 
 	return nil
@@ -549,43 +609,54 @@ func (s *AlertService) CancelAlert(ctx context.Context, alertID uuid.UUID, cance
 	s.notificationService.NotifyAllParticipants(alertID, "Alert cancelled by the requester")
 
 	if s.websocketHub != nil {
-		s.websocketHub.CloseRoom("alert_"+alertID.String(), "cancelled")
+		s.websocketHub.CloseRoom("alert_"+alertID.String(), "cancelled", s.alertParticipantIDs(ctx, alert))
 	}
 
 	return nil
 }
 
-func (s *AlertService) EscalateToEmergencyServices(alertID uuid.UUID, escalationType string) error {
+func (s *AlertService) EscalateToEmergencyServices(alertID uuid.UUID, requestedBy uint, escalationType string) error {
 	var alert models.EmergencyAlert
 	if err := s.db.First(&alert, "id = ?", alertID).Error; err != nil {
 		return err
 	}
 
-	// Create escalation record
-	escalation := &models.AlertEscalation{
-		AlertID:          alertID,
-		EscalationType:   escalationType,
-		EscalationStatus: "pending",
+	// Only the requester or someone actively responding may call in emergency services.
+	if alert.UserID != requestedBy {
+		var activeResponses int64
+		if err := s.db.Model(&models.AlertResponse{}).
+			Where("alert_id = ? AND responder_user_id = ? AND response_status IN ?", alertID, requestedBy, []string{"accepted", "arrived", "helping"}).
+			Count(&activeResponses).Error; err != nil {
+			return err
+		}
+		if activeResponses == 0 {
+			return ErrAlertAccessDenied
+		}
 	}
 
-	// Build NENA i3 payload as a JSON string
-	payload := fmt.Sprintf(`{"location": {"latitude": %f, "longitude": %f}, "caller_info": "%s", "situation_type": "%s"}`,
-		alert.AlertLocation.Latitude, alert.AlertLocation.Longitude, s.getUserInfo(alert.UserID), alert.AlertType)
-	escalation.EscalationPayload = payload
-
-	if err := s.db.Create(escalation).Error; err != nil {
-		return err
-	}
-
-	// Make 112 call via Twilio (mock implementation for safe testing)
-	callSID, err := s.make112Call(alert)
+	// SafeAround cannot reach emergency services itself, so this records the
+	// request (and alerts emergency contacts) without claiming anyone was called.
+	payload, err := json.Marshal(map[string]interface{}{
+		"location": map[string]float64{
+			"latitude":  alert.AlertLocation.Latitude,
+			"longitude": alert.AlertLocation.Longitude,
+		},
+		"caller_info":    s.getUserInfo(alert.UserID),
+		"situation_type": alert.AlertType,
+	})
 	if err != nil {
 		return err
 	}
 
-	escalation.ExternalReferenceID = callSID
-	escalation.EscalationStatus = "dispatched"
-	s.db.Save(escalation)
+	escalation := &models.AlertEscalation{
+		AlertID:           alertID,
+		EscalationType:    escalationType,
+		EscalationStatus:  "requested",
+		EscalationPayload: string(payload),
+	}
+	if err := s.db.Create(escalation).Error; err != nil {
+		return err
+	}
 
 	// Notify emergency contacts
 	s.notificationService.NotifyEmergencyContacts(alert.UserID, &alert)
@@ -620,16 +691,118 @@ func (s *AlertService) logTimelineEvent(alertID uuid.UUID, eventType string, rad
 	s.db.Create(&event)
 }
 
+// alertParticipantIDs returns everyone who was told about an alert: the
+// requester, each user it was dispatched to (initially and on every radius
+// expansion), the requester's registered emergency contacts, and each responder.
+func (s *AlertService) alertParticipantIDs(ctx context.Context, alert models.EmergencyAlert) []uint {
+	seen := map[uint]struct{}{}
+	ids := make([]uint, 0)
+	add := func(id uint) {
+		if _, ok := seen[id]; ok || id == 0 {
+			return
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	add(alert.UserID)
+
+	dispatched, _ := s.dispatchedUserIDs(ctx, []uuid.UUID{alert.ID})
+	for _, id := range dispatched[alert.ID] {
+		add(id)
+	}
+
+	var contactUserIDs []uint
+	s.db.WithContext(ctx).
+		Model(&models.User{}).
+		Joins("JOIN emergency_contacts ON emergency_contacts.phone = users.phone AND emergency_contacts.deleted_at IS NULL").
+		Where("emergency_contacts.user_id = ?", alert.UserID).
+		Pluck("users.id", &contactUserIDs)
+	for _, id := range contactUserIDs {
+		add(id)
+	}
+
+	var responderIDs []uint
+	s.db.WithContext(ctx).
+		Model(&models.AlertResponse{}).
+		Where("alert_id = ?", alert.ID).
+		Pluck("responder_user_id", &responderIDs)
+	for _, id := range responderIDs {
+		add(id)
+	}
+
+	return ids
+}
+
+// dispatchedUserIDs returns, for each alert, the users it was dispatched to,
+// initially and on every radius expansion.
+func (s *AlertService) dispatchedUserIDs(ctx context.Context, alertIDs []uuid.UUID) (map[uuid.UUID][]uint, error) {
+	dispatched := make(map[uuid.UUID][]uint, len(alertIDs))
+	if len(alertIDs) == 0 {
+		return dispatched, nil
+	}
+
+	var events []models.AlertTimelineEvent
+	if err := s.db.WithContext(ctx).
+		Where("alert_id IN ? AND event_type IN ?", alertIDs, []string{"created", "radius_expanded"}).
+		Find(&events).Error; err != nil {
+		return nil, err
+	}
+	for _, event := range events {
+		var data struct {
+			RecipientUserIDs []uint `json:"recipient_user_ids"`
+			NewUserIDs       []uint `json:"new_user_ids"`
+		}
+		if err := json.Unmarshal([]byte(event.EventData), &data); err != nil {
+			continue
+		}
+		dispatched[event.AlertID] = append(dispatched[event.AlertID], data.RecipientUserIDs...)
+		dispatched[event.AlertID] = append(dispatched[event.AlertID], data.NewUserIDs...)
+	}
+	return dispatched, nil
+}
+
+// emergencyContactOwnerIDs returns the users who saved userID's phone number
+// as an emergency contact. Their alerts are pushed straight to userID.
+func (s *AlertService) emergencyContactOwnerIDs(ctx context.Context, userID uint) (map[uint]struct{}, error) {
+	var ownerIDs []uint
+	if err := s.db.WithContext(ctx).
+		Model(&models.EmergencyContact{}).
+		Joins("JOIN users ON users.phone = emergency_contacts.phone AND users.deleted_at IS NULL").
+		Where("users.id = ?", userID).
+		Pluck("emergency_contacts.user_id", &ownerIDs).Error; err != nil {
+		return nil, err
+	}
+
+	owners := make(map[uint]struct{}, len(ownerIDs))
+	for _, id := range ownerIDs {
+		owners[id] = struct{}{}
+	}
+	return owners, nil
+}
+
+// wasAskedToHelp reports whether an alert reached userID, either because it
+// was dispatched to them or because they are the requester's emergency contact.
+func (s *AlertService) wasAskedToHelp(ctx context.Context, alert models.EmergencyAlert, userID uint) (bool, error) {
+	dispatched, err := s.dispatchedUserIDs(ctx, []uuid.UUID{alert.ID})
+	if err != nil {
+		return false, err
+	}
+	if slices.Contains(dispatched[alert.ID], userID) {
+		return true, nil
+	}
+
+	contactOwners, err := s.emergencyContactOwnerIDs(ctx, userID)
+	if err != nil {
+		return false, err
+	}
+	_, isContact := contactOwners[alert.UserID]
+	return isContact, nil
+}
+
 func (s *AlertService) getUserInfo(userID uint) string {
 	var user models.User
 	s.db.Select("name", "phone").First(&user, userID)
 	return fmt.Sprintf("Name: %s, Phone: %s", user.Name, user.Phone)
-}
-
-func (s *AlertService) make112Call(alert models.EmergencyAlert) (string, error) {
-	// In production, this would use Twilio Voice API to dial emergency services
-	// For now, we return a mock SID
-	return "CA" + uuid.New().String()[:32], nil
 }
 
 func (s *AlertService) calculateAlertDuration(alert models.EmergencyAlert) int {
@@ -661,14 +834,9 @@ func (s *AlertService) getEmergencyServicesStatus(ctx context.Context, alertID u
 		return "", err
 	}
 
-	switch escalation.EscalationStatus {
-	case "dispatched":
-		return fmt.Sprintf("%s contacted", escalation.EscalationType), nil
-	case "pending":
-		return fmt.Sprintf("%s being contacted", escalation.EscalationType), nil
-	default:
-		return escalation.EscalationStatus, nil
-	}
+	// No escalation ever reached emergency services: the old "dispatched"
+	// records came from a mock call, and new ones are only requests.
+	return fmt.Sprintf("%s requested; not contacted automatically, call %s", escalation.EscalationType, indiaEmergencyNumber), nil
 }
 
 func (s *AlertService) getAlertResponders(ctx context.Context, alertID uuid.UUID) ([]AlertResponderSummary, error) {

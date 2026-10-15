@@ -19,6 +19,7 @@ crime-pipeline/
 ├── requirements.txt
 ├── .env.example
 ├── main.py               ← FastAPI entry point
+├── scheduler.py          ← Standalone scheduler (pipeline only, no API)
 └── deploy/
     └── safearound-crime-pipeline.service  ← systemd
 ```

@@ -1,8 +1,0 @@
-env: load .env.development
-env: export API_URL GOOGLE_MAPS_API_KEY WS_URL
-Starting project at /Users/harshsaini/Desktop/Safe-Around/frontend
-Starting Metro Bundler
-
-warning: Bundler cache is empty, rebuilding (this may take a minute)
-Waiting on http://localhost:8081
-Logs for your project will appear below.
