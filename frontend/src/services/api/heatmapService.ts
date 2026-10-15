@@ -7,6 +7,7 @@ interface CrimePoint {
   severity: number;
   crime_type: string;
   weight_pct?: number;
+  location_name?: string;
 }
 
 const AREA_STATS_CACHE_TTL_MS = 20_000;

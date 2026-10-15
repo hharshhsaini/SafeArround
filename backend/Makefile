@@ -1,4 +1,4 @@
-.PHONY: run build test migrate-up migrate-down docker-up docker-down lint clean setup env deps dev install-tools fmt vet coverage docs
+.PHONY: run build test migrate-up migrate-down docker-up docker-down lint clean setup env deps dev install-tools fmt vet coverage
 
 # Default variables
 BINARY_NAME=safearound-backend
@@ -6,10 +6,8 @@ MAIN_PATH=cmd/api/main.go
 
 # --- Environment Setup Commands ---
 
-# Run initial project setup (Copy .env, start docker, health checks)
-setup:
-	@echo "Setting up development environment..."
-	@bash scripts/setup-dev.sh
+# Run initial project setup (Copy .env, download dependencies, start Postgres and Redis)
+setup: env deps docker-up
 
 # Generate .env from .env.example
 env:
@@ -46,22 +44,16 @@ vet:
 	@echo "Running go vet..."
 	@go vet ./...
 
-# Run linters via script
+# Run linters (install with `make install-tools`)
 lint:
-	@echo "Running lint script..."
-	@bash scripts/lint.sh
+	@echo "Running golangci-lint..."
+	@golangci-lint run ./...
 
-# Run tests with coverage enforcements
+# Run tests and print coverage per function
 coverage:
-	@echo "Running coverage tests..."
-	@bash scripts/test.sh
-
-# Generate Swagger API documentation
-docs:
-	@echo "Generating API Docs..."
-	# Assuming swag is installed
-	# swag init -g $(MAIN_PATH) -o ./docs/api
-	@echo "Swagger docs will be generated here."
+	@echo "Running tests with coverage..."
+	@ENV=testing go test -coverprofile=coverage.out ./...
+	@go tool cover -func=coverage.out
 
 # --- Standard Commands ---
 

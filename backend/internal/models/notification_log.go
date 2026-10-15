@@ -15,7 +15,7 @@ type NotificationLog struct {
 	Title            string         `gorm:"type:varchar(255);not null" json:"title"`
 	Body             string         `gorm:"type:text;not null" json:"body"`
 	DataJSON         string         `gorm:"type:jsonb;column:data" json:"data,omitempty"` // encoded JSON payload
-	Channel          string         `gorm:"type:varchar(20);not null" json:"channel"`     // fcm, apns, sms
+	Channel          string         `gorm:"type:varchar(20);not null" json:"channel"`     // expo, fcm, sms
 	DeviceToken      string         `gorm:"type:text" json:"device_token,omitempty"`
 	Status           string         `gorm:"type:varchar(20);index;default:'pending'" json:"status"` // pending, sent, delivered, failed, read
 	ExternalID       string         `gorm:"type:varchar(255)" json:"external_id,omitempty"`         // FCM message ID or Twilio SID

@@ -30,13 +30,25 @@ import { useAlertStore } from '@/store/alertStore';
 import { EmergencyTriggerModal } from '@/screens/emergency/EmergencyTriggerModal';
 import Animated, { useSharedValue, useAnimatedStyle, withRepeat, withTiming } from 'react-native-reanimated';
 
+// A crime popup interrupts the user, so it is shown only for incidents close
+// by and at most once a minute; the heatmap still refreshes for every update.
+const CRIME_ALERT_RADIUS_METERS = 2000;
+const CRIME_ALERT_COOLDOWN_MS = 60_000;
+// Crime updates arrive in bursts (one per inserted incident), so the heatmap
+// reloads once the burst is over rather than once per incident.
+const HEATMAP_REFRESH_DEBOUNCE_MS = 2000;
+
 export const MapDashboardScreen = () => {
   const insets = useSafeAreaInsets();
   const navigation = useNavigation();
   const mapRef = useRef<MapView>(null);
   const areaStatsDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastAreaStatsCenterRef = useRef<{ latitude: number; longitude: number } | null>(null);
+  const heatmapRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastCrimeAlertAtRef = useRef(0);
   const { currentLocation, startTracking, isTracking } = useLocation();
+  const latestLocationRef = useRef(currentLocation);
+  latestLocationRef.current = currentLocation;
   const { user } = useAuthStore();
   const { mapType, setMapType, currentStats, setCurrentStats } = useMapStore();
   const { isInDangerZone, currentZone } = useGeofencing();
@@ -113,7 +125,34 @@ export const MapDashboardScreen = () => {
   }, [currentLocation]);
 
   useEffect(() => {
+    const scheduleHeatmapRefresh = () => {
+      if (heatmapRefreshTimerRef.current) {
+        clearTimeout(heatmapRefreshTimerRef.current);
+      }
+      heatmapRefreshTimerRef.current = setTimeout(() => {
+        heatmapRefreshTimerRef.current = null;
+        setHeatmapKey(prev => prev + 1);
+      }, HEATMAP_REFRESH_DEBOUNCE_MS);
+    };
+
     const handleNewCrime = (data: any) => {
+      scheduleHeatmapRefresh();
+
+      const location = latestLocationRef.current;
+      const latitude = Number(data?.lat);
+      const longitude = Number(data?.lng);
+      if (!location || !Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+        return;
+      }
+      if (getDistanceMeters(location, { latitude, longitude }) > CRIME_ALERT_RADIUS_METERS) {
+        return;
+      }
+      const now = Date.now();
+      if (now - lastCrimeAlertAtRef.current < CRIME_ALERT_COOLDOWN_MS) {
+        return;
+      }
+      lastCrimeAlertAtRef.current = now;
+
       NativeAlert.alert(
         '🚨 Crime Alert',
         `${data.crime_type} reported nearby`,
@@ -129,7 +168,6 @@ export const MapDashboardScreen = () => {
           { text: 'Dismiss' }
         ]
       );
-      setHeatmapKey(prev => prev + 1);
     };
 
     const handleResponderAccepted = (data: any) => {
@@ -151,11 +189,16 @@ export const MapDashboardScreen = () => {
     };
 
     CrimeWebSocketService.on('crime_added', handleNewCrime);
+    CrimeWebSocketService.on('crime_batch', scheduleHeatmapRefresh);
     CrimeWebSocketService.on('responder_accepted', handleResponderAccepted);
 
     return () => {
       CrimeWebSocketService.off('crime_added', handleNewCrime);
+      CrimeWebSocketService.off('crime_batch', scheduleHeatmapRefresh);
       CrimeWebSocketService.off('responder_accepted', handleResponderAccepted);
+      if (heatmapRefreshTimerRef.current) {
+        clearTimeout(heatmapRefreshTimerRef.current);
+      }
     };
   }, []);
 

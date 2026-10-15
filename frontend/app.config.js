@@ -29,7 +29,10 @@ module.exports = () => ({
         'RECORD_AUDIO',
         'VIBRATE',
         'POST_NOTIFICATIONS',
+        'READ_CONTACTS',
       ],
+      // The app only reads contacts (to pick emergency contacts).
+      blockedPermissions: ['android.permission.WRITE_CONTACTS'],
     },
     web: {
       favicon: './assets/favicon.png',
@@ -38,6 +41,14 @@ module.exports = () => ({
       'expo-location',
       'expo-notifications',
       'expo-camera',
+      'expo-secure-store',
+      [
+        'expo-contacts',
+        {
+          contactsPermission:
+            'SafeAround uses your contacts so you can choose who to alert in an emergency.',
+        },
+      ],
       'expo-font',
     ],
     extra: {

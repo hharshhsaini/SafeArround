@@ -3,9 +3,7 @@ import { View, StyleSheet } from 'react-native';
 import { Marker } from 'react-native-maps';
 import { Location } from '@/types/models';
 import { colors } from '@/theme/colors';
-import { locationApiService, NearbyUserLocation } from '@/services/api/locationApiService';
-import { useAuthStore } from '@/store/authStore';
-import CrimeWebSocketService from '@/services/websocket/CrimeWebSocket';
+import { locationApiService, NearbyUserCell } from '@/services/api/locationApiService';
 import Animated, { useSharedValue, useAnimatedStyle, withRepeat, withTiming } from 'react-native-reanimated';
 
 interface NearbyUsersLayerProps {
@@ -14,12 +12,12 @@ interface NearbyUsersLayerProps {
 }
 
 /**
- * Shows anonymous nearby active users on the map as pulsing dots.
+ * Shows areas with nearby active users as pulsing dots, one per ~250m cell.
+ * The server sends only cell centres and counts, never exact positions.
  * Uber/Ola style — no plain Views inside MapView to avoid native crashes.
  */
 export const NearbyUsersLayer: React.FC<NearbyUsersLayerProps> = ({ userLocation, onUsersChange }) => {
-  const currentUserId = useAuthStore((state) => state.user?.id);
-  const [nearbyUsers, setNearbyUsers] = useState<NearbyUserLocation[]>([]);
+  const [nearbyCells, setNearbyCells] = useState<NearbyUserCell[]>([]);
   const pulse = useSharedValue(1);
   const lastFetchAtRef = useRef(0);
   const latestLocationRef = useRef(userLocation);
@@ -36,15 +34,13 @@ export const NearbyUsersLayer: React.FC<NearbyUsersLayerProps> = ({ userLocation
     }
     lastFetchAtRef.current = now;
 
-    const users = await locationApiService.getNearbyUsers(latestLocationRef.current, 5000, force);
-    const filteredUsers = currentUserId
-      ? users.filter((user) => String(user.userId) !== String(currentUserId))
-      : users;
+    // The server already leaves the current user out of these counts.
+    const cells = await locationApiService.getNearbyUsers(latestLocationRef.current, 5000, force);
 
-    setNearbyUsers(filteredUsers);
-    onUsersChange?.(filteredUsers.length);
+    setNearbyCells(cells);
+    onUsersChange?.(cells.reduce((total, cell) => total + cell.count, 0));
     lastFetchCenterRef.current = latestLocationRef.current;
-  }, [currentUserId, onUsersChange]);
+  }, [onUsersChange]);
 
   useEffect(() => {
     latestLocationRef.current = userLocation;
@@ -56,26 +52,9 @@ export const NearbyUsersLayer: React.FC<NearbyUsersLayerProps> = ({ userLocation
   }, [fetchNearbyUsers, userLocation]);
 
   useEffect(() => {
-    const handleNearbyUsersUpdated = (event?: { latitude?: number; longitude?: number }) => {
-      const changedLocation = event?.latitude != null && event?.longitude != null
-        ? { latitude: event.latitude, longitude: event.longitude }
-        : null;
-
-      if (
-        changedLocation &&
-        getDistanceMeters(latestLocationRef.current, changedLocation) > 6000
-      ) {
-        return;
-      }
-
-      fetchNearbyUsers(true);
-    };
-
     fetchNearbyUsers(true);
-    CrimeWebSocketService.on('nearby_users_updated', handleNearbyUsersUpdated);
     const interval = setInterval(() => fetchNearbyUsers(true), 20000);
     return () => {
-      CrimeWebSocketService.off('nearby_users_updated', handleNearbyUsersUpdated);
       clearInterval(interval);
     };
   }, [fetchNearbyUsers]);
@@ -87,12 +66,12 @@ export const NearbyUsersLayer: React.FC<NearbyUsersLayerProps> = ({ userLocation
 
   return (
     <>
-      {nearbyUsers.map((user) => (
+      {nearbyCells.map((cell) => (
         <Marker
-          key={user.userId}
+          key={`${cell.latitude}:${cell.longitude}`}
           coordinate={{
-            latitude: user.latitude,
-            longitude: user.longitude,
+            latitude: cell.latitude,
+            longitude: cell.longitude,
           }}
           anchor={{ x: 0.5, y: 0.5 }}
           tracksViewChanges={false}

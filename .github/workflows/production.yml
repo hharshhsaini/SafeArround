@@ -3,11 +3,73 @@ name: Production Deployment
 on:
   push:
     branches: [ main ]
+  pull_request:
+    branches: [ main ]
   release:
     types: [ created ]
 
 jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      # Lets the logout token-revocation test run (it skips without Redis).
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        env:
+          ENV: testing
+          TEST_REDIS_ADDR: localhost:6379
+        run: go test -race ./...
+
+  frontend-typecheck:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
   build-and-deploy:
+    # Ship only when the checks pass, and never from pull requests.
+    needs: [ backend-tests, frontend-typecheck ]
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -42,7 +104,8 @@ jobs:
 
       # 3. Deploy to Server via SSH (Optional - requires secrets.SERVER_SSH_KEY)
       - name: Deploy to Server
-        uses: appleboy/ssh-action@master
+        # Pinned to a commit: this step receives the server's SSH key.
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         with:
           host: ${{ secrets.SERVER_IP }}
           username: ${{ secrets.SERVER_USER }}

@@ -28,6 +28,18 @@ type NearbyUserLocation struct {
 	RecordedAt time.Time `json:"recorded_at"`
 }
 
+// NearbyUserCell counts nearby users in one grid cell. Only the cell centre is
+// exposed, so callers learn roughly where people are, not who or exactly where.
+type NearbyUserCell struct {
+	Latitude  float64 `json:"latitude"`
+	Longitude float64 `json:"longitude"`
+	Count     int     `json:"count"`
+}
+
+// nearbyUserCellDegrees sizes the grid that blurs nearby users: about 280m
+// north–south and roughly 250m east–west at Indian latitudes.
+const nearbyUserCellDegrees = 0.0025
+
 func NewLocationService(db *gorm.DB, redis *redis.Client, geoSvc *GeofencingService) *LocationService {
 	ls := &LocationService{
 		db:                db,
@@ -160,7 +172,47 @@ func (ls *LocationService) GetNearbyUsers(lat, lng float64, radius int) ([]uint,
 	return userIDs, err
 }
 
-func (ls *LocationService) GetNearbyUserLocations(lat, lng float64, radius int, excludeUserID uint) ([]NearbyUserLocation, error) {
+// GetNearbyUserCells returns how many other users were recently near a point,
+// grouped into grid cells. Exact positions and user IDs stay inside the service.
+func (ls *LocationService) GetNearbyUserCells(lat, lng float64, radius int, excludeUserID uint) ([]NearbyUserCell, error) {
+	users, err := ls.getNearbyUserLocations(lat, lng, radius, excludeUserID)
+	if err != nil {
+		return nil, err
+	}
+	return groupNearbyUsersIntoCells(users, nearbyUserCellDegrees), nil
+}
+
+// groupNearbyUsersIntoCells counts users per grid cell, keeping the order in
+// which each cell is first seen.
+func groupNearbyUsersIntoCells(users []NearbyUserLocation, cellDegrees float64) []NearbyUserCell {
+	type cellKey struct{ lat, lng int64 }
+	indexes := make(map[cellKey]int)
+	cells := make([]NearbyUserCell, 0)
+	for _, user := range users {
+		key := cellKey{
+			lat: int64(math.Floor(user.Latitude / cellDegrees)),
+			lng: int64(math.Floor(user.Longitude / cellDegrees)),
+		}
+		if i, ok := indexes[key]; ok {
+			cells[i].Count++
+			continue
+		}
+		indexes[key] = len(cells)
+		cells = append(cells, NearbyUserCell{
+			Latitude:  cellCentre(key.lat, cellDegrees),
+			Longitude: cellCentre(key.lng, cellDegrees),
+			Count:     1,
+		})
+	}
+	return cells
+}
+
+// cellCentre returns the middle of a grid cell, rounded to 6 decimal places.
+func cellCentre(index int64, cellDegrees float64) float64 {
+	return math.Round((float64(index)+0.5)*cellDegrees*1e6) / 1e6
+}
+
+func (ls *LocationService) getNearbyUserLocations(lat, lng float64, radius int, excludeUserID uint) ([]NearbyUserLocation, error) {
 	cacheKey := nearbyUsersCacheKey(lat, lng, radius, excludeUserID)
 	if users, ok := ls.getCachedNearbyUsers(cacheKey); ok {
 		return users, nil
@@ -192,12 +244,7 @@ func (ls *LocationService) GetNearbyUserLocations(lat, lng float64, radius int, 
 	`
 
 	var users []NearbyUserLocation
-	fmt.Printf("DEBUG: GetNearbyUserLocations - excludeUserID: %d, lat: %f, lng: %f, radius: %d\n", excludeUserID, lat, lng, radius)
 	err := ls.db.Raw(query, excludeUserID, lng, lat, radius, lng, lat).Scan(&users).Error
-	fmt.Printf("DEBUG: Query returned %d users\n", len(users))
-	for i, user := range users {
-		fmt.Printf("DEBUG: User %d - ID: %d\n", i, user.UserID)
-	}
 	if err == nil {
 		ls.cacheNearbyUsers(cacheKey, users)
 	}

@@ -24,7 +24,6 @@ func RunMigrations(db *gorm.DB) error {
 	// 2. AutoMigrate Go structs → tables
 	err := db.AutoMigrate(
 		&models.User{},
-		&models.Notification{},
 		&models.EmergencyContact{},
 		&models.UserSession{},
 		&models.EmergencyAlert{},

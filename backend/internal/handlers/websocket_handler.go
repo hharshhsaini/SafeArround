@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"encoding/json"
 	"log"
 	"net/http"
 
@@ -14,40 +13,29 @@ var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 	CheckOrigin: func(r *http.Request) bool {
-		return true // Configure properly in production
+		// Origin is not the security boundary here: the route requires a
+		// bearer token, which browsers cannot attach to cross-site sockets.
+		return true
 	},
 }
 
+// HandleWebSocket must be mounted behind middleware.AuthRequired so every
+// connection is tied to a user and only receives events meant for them.
 func HandleWebSocket(hub *customWS.CrimeHub) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		userIDVal, exists := c.Get("user_id")
+		if !exists {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+			return
+		}
+		userID := userIDVal.(uint)
+
 		conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 		if err != nil {
 			log.Println("Upgrade error:", err)
 			return
 		}
 
-		hub.Register(conn)
-
-		// Send welcome message
-		welcome := map[string]interface{}{
-			"event":   "connected",
-			"message": "Connected to SafeAround real-time updates",
-		}
-		data, _ := json.Marshal(welcome)
-		conn.WriteMessage(websocket.TextMessage, data)
-
-		// Read loop (keep connection alive)
-		go func() {
-			defer func() {
-				hub.Unregister(conn)
-			}()
-
-			for {
-				_, _, err := conn.ReadMessage()
-				if err != nil {
-					break
-				}
-			}
-		}()
+		hub.Serve(conn, userID)
 	}
 }

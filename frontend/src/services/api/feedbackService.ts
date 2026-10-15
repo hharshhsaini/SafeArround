@@ -26,16 +26,11 @@ export interface UserRatingStats {
   three_star_count: number;
   two_star_count: number;
   one_star_count: number;
-  recent_feedback: Array<{
-    id: number;
-    alert_id: string;
-    user_id: number;
-    responder_id?: number;
+  // Only returned when viewing your own ratings.
+  recent_feedback?: Array<{
     rating: number;
     feedback?: string;
-    summary_note?: string;
     was_helpful?: boolean;
-    feedback_type: string;
     created_at: string;
   }>;
 }
@@ -43,7 +38,7 @@ export interface UserRatingStats {
 export interface TopRatedUser {
   id: number;
   name: string;
-  phone: string;
+  profile_picture_url?: string;
   average_rating: number;
   total_ratings: number;
 }

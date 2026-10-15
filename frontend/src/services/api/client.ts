@@ -33,15 +33,19 @@ apiClient.interceptors.response.use(
                            originalRequest.url?.includes('auth/refresh') || 
                            originalRequest.url?.includes('auth/login');
                            
-    if (error.response?.status === 401 && !originalRequest._retry && !isAuthEndpoint) {
+    // Without a session there is nothing to refresh: let the 401 through so
+    // callers such as OTP verification see the server's error.
+    const { useAuthStore: authStoreForSession } = require('@/store/authStore');
+    const hasSession = !!authStoreForSession.getState().refreshToken;
+
+    if (error.response?.status === 401 && !originalRequest._retry && !isAuthEndpoint && hasSession) {
       originalRequest._retry = true;
 
       try {
         const { useAuthStore } = require('@/store/authStore');
-        const authStore = useAuthStore.getState();
-        
-        await authStore.refreshAccessToken();
-        const newToken = authStore.accessToken;
+
+        await useAuthStore.getState().refreshAccessToken();
+        const newToken = useAuthStore.getState().accessToken;
         
         if (newToken && originalRequest.headers) {
           originalRequest.headers.Authorization = `Bearer ${newToken}`;

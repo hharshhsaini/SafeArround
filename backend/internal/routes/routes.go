@@ -43,31 +43,32 @@ func SetupRouter(
 		healthGroup.GET("/readiness", healthHandler.GetReadiness)
 	}
 
-	// WebSockets Upgrade Endpoint
-	r.GET("/ws/crime", wsHandler)
+	// WebSockets Upgrade Endpoint (authenticated so events can be targeted per user)
+	r.GET("/ws/crime", middleware.AuthRequired(rdb), wsHandler)
 
 	// API Endpoints - applying global rate limit of 1000 requests / minute for development
 	api := r.Group("/api/v1")
 	api.Use(middleware.RateLimit(rdb, 1000, 60*time.Second))
 	{
-		SetupAuthRoutes(api, authHandler)
+		SetupAuthRoutes(api, authHandler, rdb)
 
 		// Notifications domain
 		notifs := api.Group("/notifications")
-		notifs.Use(middleware.AuthRequired())
+		notifs.Use(middleware.AuthRequired(rdb))
 		{
 			notifs.POST("/register-token", notifHandler.RegisterDeviceToken)
-			// Example of stricter rate limit on push triggers (10 / min)
-			notifs.POST("", middleware.RateLimit(rdb, 10, 60*time.Second), notifHandler.SendPushNotification)
+			// There is deliberately no route for sending arbitrary pushes: any
+			// signed-in user could have used it to spoof alerts.
 
 			// Standard history fetches
 			notifs.GET("/history", notifHandler.GetNotificationHistory)
 			notifs.PUT("/:id/read", notifHandler.UpdateNotificationStatus)
+			notifs.PATCH("/:id/read", notifHandler.UpdateNotificationStatus) // the app's client uses PATCH
 		}
 
 		// Emergency Alerts domain
 		alerts := api.Group("/alerts")
-		alerts.Use(middleware.AuthRequired())
+		alerts.Use(middleware.AuthRequired(rdb))
 		{
 			alerts.POST("", alertHandler.CreateAlert)
 			alerts.GET("/:id", alertHandler.GetAlertDetails)
@@ -87,12 +88,12 @@ func SetupRouter(
 			heatmap.GET("/zone", heatmapHandler.GetZoneInfo)
 			heatmap.GET("/crimes", heatmapHandler.GetRecentCrimes)
 			heatmap.GET("/statistics", heatmapHandler.GetStatistics)
-			heatmap.POST("/report", middleware.AuthRequired(), heatmapHandler.ReportIncident)
+			heatmap.POST("/report", middleware.AuthRequired(rdb), heatmapHandler.ReportIncident)
 		}
 
 		// Location domain
 		location := api.Group("/location")
-		location.Use(middleware.AuthRequired())
+		location.Use(middleware.AuthRequired(rdb))
 		{
 			location.POST("", locationHandler.UpdateLocation)
 			location.GET("/me", locationHandler.GetCurrentLocation)
@@ -103,14 +104,14 @@ func SetupRouter(
 
 		// Safe Route Planning
 		routesGroup := api.Group("/routes")
-		routesGroup.Use(middleware.AuthRequired())
+		routesGroup.Use(middleware.AuthRequired(rdb))
 		{
 			routesGroup.POST("/safe", routeHandler.GetSafeRoutes)
 		}
 
 		// User Profile & Contacts domain
 		users := api.Group("/users")
-		users.Use(middleware.AuthRequired())
+		users.Use(middleware.AuthRequired(rdb))
 		{
 			users.GET("/profile", profileHandler.GetProfile)
 			users.PUT("/profile", profileHandler.UpdateProfile)
@@ -123,14 +124,14 @@ func SetupRouter(
 
 		// Feedback domain
 		feedback := api.Group("/feedback")
-		feedback.Use(middleware.AuthRequired())
+		feedback.Use(middleware.AuthRequired(rdb))
 		{
 			feedback.POST("", feedbackHandler.SubmitFeedback)
 		}
 
 		// Geofencing domain
 		geofencing := api.Group("/geofencing")
-		geofencing.Use(middleware.AuthRequired())
+		geofencing.Use(middleware.AuthRequired(rdb))
 		{
 			geofencing.GET("/check", geofencingHandler.CheckDangerZone)
 			geofencing.GET("/nearby-users", geofencingHandler.GetNearbyUsers)

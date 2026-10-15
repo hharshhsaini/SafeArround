@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/obsidiannnn/Safe-Around/backend/internal/models"
+	"github.com/obsidiannnn/Safe-Around/backend/internal/utils"
 	"github.com/obsidiannnn/Safe-Around/backend/pkg/fcm"
 	"github.com/obsidiannnn/Safe-Around/backend/pkg/logger"
 	"github.com/obsidiannnn/Safe-Around/backend/pkg/twilio"
@@ -26,12 +27,14 @@ const (
 
 // --- Interface ---
 
+// ErrNotificationNotFound means no notification with that ID belongs to the user.
+var ErrNotificationNotFound = errors.New("notification not found")
+
 type NotificationService interface {
-	SendPushNotification(userID uint, deviceToken, title, body string, data map[string]string) error
 	SendSMS(phone, message string) error
 	QueueNotification(userID uint, title, body, notifType string) error
-	GetHistory(userID uint, limit, offset int) ([]models.Notification, int64, error)
-	MarkAsRead(notifID uint) error
+	GetHistory(userID uint, limit, offset int) ([]models.NotificationLog, int64, error)
+	MarkAsRead(userID, notifID uint) error
 	RegisterDeviceToken(userID uint, token, platform string) error
 	SendEmergencyAlert(userID uint, alert *models.EmergencyAlert) error
 	NotifyResponderAccepted(userID uint, response *models.AlertResponse) error
@@ -86,41 +89,6 @@ func (s *notifService) worker() {
 
 // ---- Public API ----
 
-func (s *notifService) SendPushNotification(userID uint, deviceToken, title, body string, data map[string]string) error {
-	notif := models.Notification{
-		UserID: userID,
-		Title:  title,
-		Body:   body,
-		Type:   "push",
-		Status: "pending",
-	}
-	if err := s.db.Create(&notif).Error; err != nil {
-		return err
-	}
-
-	iData := make(map[string]interface{}, len(data))
-	for k, v := range data {
-		iData[k] = v
-	}
-
-	msgID, err := s.sendWithRetry(deviceToken, title, body, data)
-	if err != nil {
-		notif.Status = "failed"
-		notif.Error = err.Error()
-	} else {
-		notif.Status = "sent"
-		notif.MessageID = msgID
-	}
-	saveErr := s.db.Save(&notif).Error
-	if err != nil {
-		if saveErr != nil {
-			return fmt.Errorf("push delivery failed: %w (additionally failed to persist notification status: %v)", err, saveErr)
-		}
-		return err
-	}
-	return saveErr
-}
-
 func (s *notifService) SendSMS(phone, message string) error {
 	if phone == "" {
 		return nil
@@ -147,20 +115,30 @@ func (s *notifService) QueueNotification(userID uint, title, body, notifType str
 	}).Err()
 }
 
-func (s *notifService) GetHistory(userID uint, limit, offset int) ([]models.Notification, int64, error) {
-	var notifs []models.Notification
+// GetHistory lists the notifications sent to a user. They live in
+// notification_logs, the same table MarkAsRead updates.
+func (s *notifService) GetHistory(userID uint, limit, offset int) ([]models.NotificationLog, int64, error) {
+	var notifs []models.NotificationLog
 	var total int64
-	query := s.db.Model(&models.Notification{}).Where("user_id = ?", userID)
+	query := s.db.Model(&models.NotificationLog{}).Where("user_id = ?", userID)
 	query.Count(&total)
 	err := query.Order("created_at desc").Limit(limit).Offset(offset).Find(&notifs).Error
 	return notifs, total, err
 }
 
-func (s *notifService) MarkAsRead(notifID uint) error {
+// MarkAsRead marks one of the user's own notifications as read.
+func (s *notifService) MarkAsRead(userID, notifID uint) error {
 	now := time.Now()
-	return s.db.Model(&models.NotificationLog{}).
-		Where("id = ?", notifID).
-		Updates(map[string]interface{}{"status": "read", "read_at": &now}).Error
+	result := s.db.Model(&models.NotificationLog{}).
+		Where("id = ? AND user_id = ?", notifID, userID).
+		Updates(map[string]interface{}{"status": "read", "read_at": &now})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrNotificationNotFound
+	}
+	return nil
 }
 
 func (s *notifService) RegisterDeviceToken(userID uint, token, platform string) error {
@@ -279,9 +257,13 @@ func (s *notifService) NotifyEmergencyContacts(userID uint, alert *models.Emerge
 	)
 
 	for _, contact := range contacts {
+		// Contacts saved before numbers were normalised may lack the +91, which
+		// would make both the user lookup and the SMS fail.
+		phone := utils.NormalizePhone(contact.Phone)
+
 		// 1. Try to find a registered user with this phone number
 		var contactUser models.User
-		if err := s.db.Where("phone = ?", contact.Phone).First(&contactUser).Error; err == nil {
+		if err := s.db.Where("phone = ?", phone).First(&contactUser).Error; err == nil {
 			// Found a registered user! Send in-app notification
 			s.queue <- &notificationTask{
 				UserID:           contactUser.ID,
@@ -310,7 +292,7 @@ func (s *notifService) NotifyEmergencyContacts(userID uint, alert *models.Emerge
 			if err := s.SendSMS(phone, msgText); err != nil {
 				logger.Warn("Emergency contact SMS/Call failed", zap.String("phone", phone), zap.Error(err))
 			}
-		}(contact.Phone)
+		}(phone)
 	}
 	return nil
 }
@@ -348,27 +330,23 @@ func (s *notifService) processTask(task *notificationTask) {
 		return
 	}
 
-	var (
-		msgID   string
-		sendErr error
-	)
-
 	strData := make(map[string]string)
 	for k, v := range task.Data {
 		strData[k] = fmt.Sprint(v)
 	}
 
-	if session.FCMToken != "" {
-		logEntry.Channel = "fcm"
-		logEntry.DeviceToken = session.FCMToken
-		msgID, sendErr = s.sendWithRetry(session.FCMToken, task.Title, task.Body, strData)
-	} else if session.APNsToken != "" {
-		// APNs: stub — would use apple/apns2 library in production
-		logEntry.Channel = "apns"
-		logEntry.DeviceToken = session.APNsToken
-		msgID = "apns_stub"
-		sendErr = nil
+	// The app registers Expo push tokens on both platforms (iOS ones are stored
+	// in the APNs column), and the client sends each token the right way.
+	deviceToken := session.FCMToken
+	if deviceToken == "" {
+		deviceToken = session.APNsToken
 	}
+	logEntry.Channel = "fcm"
+	if fcm.IsExpoPushToken(deviceToken) {
+		logEntry.Channel = "expo"
+	}
+	logEntry.DeviceToken = deviceToken
+	msgID, sendErr := s.sendWithRetry(deviceToken, task.Title, task.Body, strData)
 
 	now := time.Now()
 	if sendErr != nil {
@@ -382,26 +360,27 @@ func (s *notifService) processTask(task *notificationTask) {
 
 	s.db.Create(logEntry)
 
-	// Critical: also send SMS as backup
-	if task.Priority == "critical" {
+	// Critical: SMS only when the push could not be sent
+	if sendErr != nil && task.Priority == "critical" {
 		s.smsFallback(task)
 	}
 }
 
-// sendWithRetry sends via FCM with exponential backoff: 1s, 5s, 30s
+// sendWithRetry sends a push, retrying after 1s and 5s. Failures that a retry
+// can't fix return at once so the SMS fallback isn't held up.
 func (s *notifService) sendWithRetry(token, title, body string, data map[string]string) (string, error) {
-	delays := []time.Duration{1 * time.Second, 5 * time.Second, 30 * time.Second}
-	var lastErr error
-	for attempt, delay := range delays {
+	delays := []time.Duration{1 * time.Second, 5 * time.Second}
+	for attempt := 0; ; attempt++ {
 		msgID, err := s.fcm.SendNotification(token, title, body, data)
 		if err == nil {
 			return msgID, nil
 		}
-		lastErr = err
-		logger.Warn("FCM retry", zap.Int("attempt", attempt+1), zap.Error(err))
-		time.Sleep(delay)
+		if errors.Is(err, fcm.ErrUndeliverable) || attempt == len(delays) {
+			return "", err
+		}
+		logger.Warn("Push retry", zap.Int("attempt", attempt+1), zap.Error(err))
+		time.Sleep(delays[attempt])
 	}
-	return "", lastErr
 }
 
 // smsFallback sends an SMS via Twilio when push fails
@@ -412,34 +391,5 @@ func (s *notifService) smsFallback(task *notificationTask) {
 	}
 	if err := s.SendSMS(user.Phone, task.Body); err != nil {
 		logger.Warn("SMS fallback failed", zap.Uint("userID", task.UserID), zap.Error(err))
-	}
-}
-
-// SendBatchPush sends a multicast notification to up to 500 FCM tokens at a time.
-func (s *notifService) SendBatchPush(userIDs []uint, title, body string, data map[string]string) {
-	// Collect active FCM tokens
-	var sessions []models.UserSession
-	s.db.Where("user_id IN ? AND is_revoked = ? AND fcm_token != ?", userIDs, false, "").
-		Order("created_at DESC").
-		Find(&sessions)
-
-	tokens := make([]string, 0, len(sessions))
-	for _, sess := range sessions {
-		tokens = append(tokens, sess.FCMToken)
-	}
-
-	// Chunk into 500-token batches (FCM multicast limit)
-	batchSize := 500
-	for i := 0; i < len(tokens); i += batchSize {
-		end := i + batchSize
-		if end > len(tokens) {
-			end = len(tokens)
-		}
-		batch := tokens[i:end]
-		go func(chunk []string) {
-			if _, err := s.fcm.SendMulticast(chunk, title, body, data); err != nil {
-				logger.Warn("Batch FCM send failed", zap.Int("batch_size", len(chunk)), zap.Error(err))
-			}
-		}(batch)
 	}
 }

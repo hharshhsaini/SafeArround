@@ -25,7 +25,10 @@ import { fontSizes } from '@/theme/typography';
 
 interface DeviceContactsPickerModalProps {
   visible: boolean;
+  /** Normalized (E.164) numbers already saved, hidden from the list. */
   existingPhones?: string[];
+  /** How many more contacts the user may add. */
+  maxSelectable?: number;
   onClose: () => void;
   onImport: (contacts: DeviceContactOption[]) => Promise<void> | void;
 }
@@ -33,6 +36,7 @@ interface DeviceContactsPickerModalProps {
 export const DeviceContactsPickerModal: React.FC<DeviceContactsPickerModalProps> = ({
   visible,
   existingPhones = [],
+  maxSelectable,
   onClose,
   onImport,
 }) => {
@@ -113,6 +117,14 @@ export const DeviceContactsPickerModal: React.FC<DeviceContactsPickerModalProps>
   }, [contacts, existingPhoneSet, search]);
 
   const toggleSelection = (contactId: string) => {
+    if (!selectedIds.has(contactId) && maxSelectable !== undefined && selectedIds.size >= maxSelectable) {
+      Alert.alert(
+        'Contact limit reached',
+        `You can add ${maxSelectable} more emergency contact${maxSelectable === 1 ? '' : 's'}.`,
+      );
+      return;
+    }
+
     setSelectedIds((previous) => {
       const next = new Set(previous);
       if (next.has(contactId)) {
@@ -125,7 +137,9 @@ export const DeviceContactsPickerModal: React.FC<DeviceContactsPickerModalProps>
   };
 
   const handleImport = async () => {
-    const selectedContacts = filteredContacts.filter((contact) => selectedIds.has(contact.id));
+    // Pick from all contacts, not just those matching the current search, so
+    // a selection made before searching again is not dropped.
+    const selectedContacts = contacts.filter((contact) => selectedIds.has(contact.id));
     if (selectedContacts.length === 0) {
       onClose();
       return;
@@ -147,7 +161,10 @@ export const DeviceContactsPickerModal: React.FC<DeviceContactsPickerModalProps>
           <View style={styles.header}>
             <View>
               <Text style={styles.title}>Import from Contacts</Text>
-              <Text style={styles.subtitle}>Select trusted people from your phone book.</Text>
+              <Text style={styles.subtitle}>
+                Select trusted people from your phone book.
+                {maxSelectable !== undefined ? ` You can add ${maxSelectable} more.` : ''}
+              </Text>
             </View>
             <Pressable onPress={onClose} style={styles.closeButton}>
               <Icon name="close" size={24} color={colors.textPrimary} />
