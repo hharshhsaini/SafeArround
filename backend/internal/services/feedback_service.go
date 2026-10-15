@@ -1,10 +1,18 @@
 package services
 
 import (
+	"errors"
 	"fmt"
+	"time"
 
 	"github.com/obsidiannnn/Safe-Around/backend/internal/models"
 	"gorm.io/gorm"
+)
+
+var (
+	ErrFeedbackNotAllowed = errors.New("you can only give feedback on your own alerts")
+	ErrNotAResponder      = errors.New("that user did not respond to this alert")
+	ErrAlreadyRated       = errors.New("you have already rated this responder for this alert")
 )
 
 type FeedbackService struct {
@@ -15,8 +23,43 @@ func NewFeedbackService(db *gorm.DB) *FeedbackService {
 	return &FeedbackService{db: db}
 }
 
-// SubmitFeedback creates a new feedback entry and updates user ratings
+// SubmitFeedback creates a new feedback entry and updates user ratings. Only
+// the person who raised the alert may leave feedback, and a rated responder
+// must have responded to that alert, once per alert.
 func (s *FeedbackService) SubmitFeedback(feedback *models.UserFeedback) error {
+	var alert models.EmergencyAlert
+	if err := s.db.Select("id", "user_id").First(&alert, "id = ?", feedback.AlertID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrFeedbackNotAllowed
+		}
+		return err
+	}
+	if alert.UserID != feedback.UserID {
+		return ErrFeedbackNotAllowed
+	}
+
+	if feedback.ResponderID != nil {
+		var responses int64
+		if err := s.db.Model(&models.AlertResponse{}).
+			Where("alert_id = ? AND responder_user_id = ?", feedback.AlertID, *feedback.ResponderID).
+			Count(&responses).Error; err != nil {
+			return err
+		}
+		if responses == 0 {
+			return ErrNotAResponder
+		}
+
+		var existing int64
+		if err := s.db.Model(&models.UserFeedback{}).
+			Where("alert_id = ? AND user_id = ? AND responder_id = ?", feedback.AlertID, feedback.UserID, *feedback.ResponderID).
+			Count(&existing).Error; err != nil {
+			return err
+		}
+		if existing > 0 {
+			return ErrAlreadyRated
+		}
+	}
+
 	tx := s.db.Begin()
 	defer func() {
 		if r := recover(); r != nil {
@@ -87,23 +130,16 @@ func (s *FeedbackService) updateUserRatings(tx *gorm.DB, userID uint) error {
 	return nil
 }
 
-// GetUserRatingStats returns detailed rating statistics for a user
-func (s *FeedbackService) GetUserRatingStats(userID uint) (*UserRatingStats, error) {
+// GetUserRatingStats returns rating statistics for a user. Recent feedback is
+// included only when includeRecent is set, which callers do for the rated
+// user themselves.
+func (s *FeedbackService) GetUserRatingStats(userID uint, includeRecent bool) (*UserRatingStats, error) {
 	var user models.User
 	if err := s.db.First(&user, userID).Error; err != nil {
 		return nil, fmt.Errorf("user not found: %w", err)
 	}
 
-	// Get recent feedback
-	var recentFeedback []models.UserFeedback
-	if err := s.db.Where("responder_id = ?", userID).
-		Order("created_at DESC").
-		Limit(10).
-		Find(&recentFeedback).Error; err != nil {
-		return nil, fmt.Errorf("failed to get recent feedback: %w", err)
-	}
-
-	return &UserRatingStats{
+	stats := &UserRatingStats{
 		UserID:         user.ID,
 		AverageRating:  user.AverageRating,
 		TotalRatings:   user.TotalRatings,
@@ -112,12 +148,32 @@ func (s *FeedbackService) GetUserRatingStats(userID uint) (*UserRatingStats, err
 		ThreeStarCount: user.ThreeStarCount,
 		TwoStarCount:   user.TwoStarCount,
 		OneStarCount:   user.OneStarCount,
-		RecentFeedback: recentFeedback,
-	}, nil
+	}
+	if !includeRecent {
+		return stats, nil
+	}
+
+	var recentFeedback []models.UserFeedback
+	if err := s.db.Where("responder_id = ?", userID).
+		Order("created_at DESC").
+		Limit(10).
+		Find(&recentFeedback).Error; err != nil {
+		return nil, fmt.Errorf("failed to get recent feedback: %w", err)
+	}
+	stats.RecentFeedback = make([]RatingFeedback, 0, len(recentFeedback))
+	for _, f := range recentFeedback {
+		stats.RecentFeedback = append(stats.RecentFeedback, RatingFeedback{
+			Rating:     f.Rating,
+			Feedback:   f.Feedback,
+			WasHelpful: f.WasHelpful,
+			CreatedAt:  f.CreatedAt,
+		})
+	}
+	return stats, nil
 }
 
-// GetTopRatedUsers returns users with highest ratings
-func (s *FeedbackService) GetTopRatedUsers(limit int) ([]models.User, error) {
+// GetTopRatedUsers returns the highest rated responders' public profiles.
+func (s *FeedbackService) GetTopRatedUsers(limit int) ([]PublicRatedUser, error) {
 	var users []models.User
 	if err := s.db.Where("total_ratings >= ?", 5). // Minimum 5 ratings to be considered
 		Order("average_rating DESC, total_ratings DESC").
@@ -126,17 +182,46 @@ func (s *FeedbackService) GetTopRatedUsers(limit int) ([]models.User, error) {
 		return nil, fmt.Errorf("failed to get top rated users: %w", err)
 	}
 
-	return users, nil
+	public := make([]PublicRatedUser, 0, len(users))
+	for _, u := range users {
+		public = append(public, PublicRatedUser{
+			ID:                u.ID,
+			Name:              u.Name,
+			ProfilePictureURL: u.ProfilePictureURL,
+			AverageRating:     u.AverageRating,
+			TotalRatings:      u.TotalRatings,
+		})
+	}
+	return public, nil
 }
 
 type UserRatingStats struct {
-	UserID         uint                    `json:"user_id"`
-	AverageRating  float64                 `json:"average_rating"`
-	TotalRatings   int                     `json:"total_ratings"`
-	FiveStarCount  int                     `json:"five_star_count"`
-	FourStarCount  int                     `json:"four_star_count"`
-	ThreeStarCount int                     `json:"three_star_count"`
-	TwoStarCount   int                     `json:"two_star_count"`
-	OneStarCount   int                     `json:"one_star_count"`
-	RecentFeedback []models.UserFeedback   `json:"recent_feedback"`
+	UserID         uint             `json:"user_id"`
+	AverageRating  float64          `json:"average_rating"`
+	TotalRatings   int              `json:"total_ratings"`
+	FiveStarCount  int              `json:"five_star_count"`
+	FourStarCount  int              `json:"four_star_count"`
+	ThreeStarCount int              `json:"three_star_count"`
+	TwoStarCount   int              `json:"two_star_count"`
+	OneStarCount   int              `json:"one_star_count"`
+	RecentFeedback []RatingFeedback `json:"recent_feedback,omitempty"`
+}
+
+// RatingFeedback is one rating as shown to the person who was rated. It
+// leaves out the alert and who gave it, so it can't be traced to an emergency.
+type RatingFeedback struct {
+	Rating     int       `json:"rating"`
+	Feedback   string    `json:"feedback,omitempty"`
+	WasHelpful *bool     `json:"was_helpful,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+// PublicRatedUser is what any signed-in user may see about a top responder:
+// no phone number, email or activity history.
+type PublicRatedUser struct {
+	ID                uint    `json:"id"`
+	Name              string  `json:"name"`
+	ProfilePictureURL string  `json:"profile_picture_url,omitempty"`
+	AverageRating     float64 `json:"average_rating"`
+	TotalRatings      int     `json:"total_ratings"`
 }

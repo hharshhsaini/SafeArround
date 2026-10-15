@@ -7,16 +7,14 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/obsidiannnn/Safe-Around/backend/internal/models"
 	"github.com/obsidiannnn/Safe-Around/backend/internal/services"
-	customWS "github.com/obsidiannnn/Safe-Around/backend/internal/websocket"
 )
 
 type LocationHandler struct {
-	locationSvc  *services.LocationService
-	websocketHub *customWS.CrimeHub
+	locationSvc *services.LocationService
 }
 
-func NewLocationHandler(svc *services.LocationService, hub *customWS.CrimeHub) *LocationHandler {
-	return &LocationHandler{locationSvc: svc, websocketHub: hub}
+func NewLocationHandler(svc *services.LocationService) *LocationHandler {
+	return &LocationHandler{locationSvc: svc}
 }
 
 // UpdateLocation handles POST /api/v1/location
@@ -63,10 +61,6 @@ func (h *LocationHandler) UpdateLocation(c *gin.Context) {
 	if err := h.locationSvc.UpdateUserLocation(userID, loc); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update location"})
 		return
-	}
-
-	if h.websocketHub != nil {
-		h.websocketHub.BroadcastNearbyUsersUpdated(userID, req.Latitude, req.Longitude)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
@@ -125,22 +119,21 @@ func (h *LocationHandler) GetNearbyUsers(c *gin.Context) {
 		return
 	}
 
-	users, err := h.locationSvc.GetNearbyUserLocations(lat, lng, radius, userID)
+	cells, err := h.locationSvc.GetNearbyUserCells(lat, lng, radius, userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Query failed"})
 		return
 	}
 
-	userIDs := make([]uint, 0, len(users))
-	for _, user := range users {
-		userIDs = append(userIDs, user.UserID)
+	count := 0
+	for _, cell := range cells {
+		count += cell.Count
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"success":         true,
-		"data":            users,
-		"nearby_user_ids": userIDs,
-		"count":           len(userIDs),
-		"radius_meters":   radius,
+		"success":       true,
+		"data":          cells,
+		"count":         count,
+		"radius_meters": radius,
 	})
 }

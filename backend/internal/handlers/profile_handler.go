@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/obsidiannnn/Safe-Around/backend/internal/models"
+	"github.com/obsidiannnn/Safe-Around/backend/internal/utils"
 	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 )
@@ -234,11 +235,26 @@ func (h *ProfileHandler) AddContact(c *gin.Context) {
 		return
 	}
 
+	// Store E.164 numbers only: SOS texts are sent to this number, and it is
+	// how a contact who also uses SafeAround is recognised.
+	req.Phone = utils.NormalizePhone(req.Phone)
+	if err := validatePhoneNumber(req.Phone); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Enter a valid phone number, e.g. 9876543210 or +919876543210"})
+		return
+	}
+
 	// Max 5 contacts per user
 	var count int64
 	h.db.Model(&models.EmergencyContact{}).Where("user_id = ?", userID).Count(&count)
 	if count >= 5 {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Maximum 5 emergency contacts allowed"})
+		return
+	}
+
+	var duplicates int64
+	h.db.Model(&models.EmergencyContact{}).Where("user_id = ? AND phone = ?", userID, req.Phone).Count(&duplicates)
+	if duplicates > 0 {
+		c.JSON(http.StatusConflict, gin.H{"error": "This number is already one of your emergency contacts"})
 		return
 	}
 

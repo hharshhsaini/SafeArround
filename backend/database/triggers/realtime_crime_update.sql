@@ -40,6 +40,9 @@ GROUP BY grid_x, grid_y;
 CREATE UNIQUE INDEX ON mv_crime_heatmap_grid(grid_x, grid_y);
 
 -- 3. Real-time trigger for WebSocket notifications
+-- Only verified incidents are announced; unverified user reports stay off
+-- everyone's screens. The API also drops any new_crime event without
+-- "verified": true, so this section can be re-run on its own.
 CREATE OR REPLACE FUNCTION notify_crime_update()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -52,7 +55,8 @@ BEGIN
             'severity', NEW.severity,
             'lat', ST_Y(NEW.location::geometry),
             'lng', ST_X(NEW.location::geometry),
-            'occurred_at', NEW.occurred_at
+            'occurred_at', NEW.occurred_at,
+            'verified', NEW.verified
         )::text
     );
     RETURN NEW;
@@ -63,4 +67,5 @@ DROP TRIGGER IF EXISTS crime_insert_trigger ON crime_incidents;
 CREATE TRIGGER crime_insert_trigger
     AFTER INSERT ON crime_incidents
     FOR EACH ROW
+    WHEN (NEW.verified IS TRUE)
     EXECUTE FUNCTION notify_crime_update();

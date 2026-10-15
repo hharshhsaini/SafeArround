@@ -99,15 +99,11 @@ export const MainNavigator = () => {
 
     const authUserId = String(useAuthStore.getState().user?.id ?? '');
     const sourceUserId = String(payload?.user?.user_id ?? payload?.user_id ?? '');
-    const recipientIds = Array.isArray(payload?.recipient_user_ids)
-      ? payload.recipient_user_ids.map((id: unknown) => String(id))
-      : [];
     const alertId = String(payload?.alert_id ?? '');
 
+    // The server sends emergency alerts only to the users they were dispatched
+    // to, so any alert that arrives here is meant for this user.
     if (!alertId || !authUserId || sourceUserId === authUserId) {
-      return;
-    }
-    if (recipientIds.length > 0 && !recipientIds.includes(authUserId)) {
       return;
     }
     if (useAlertStore.getState().activeAlert?.id === alertId || useAlertStore.getState().isAlertActive) {

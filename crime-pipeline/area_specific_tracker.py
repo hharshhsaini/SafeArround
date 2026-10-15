@@ -17,7 +17,7 @@ Algorithm Flow (per area):
   5. Geocode the sub-location for a precise lat/lng pin
   6. Spatial check: pin must be within area.radius_km of area center
   7. Extract crime_type, severity, date
-  8. Bulk upsert to PostgreSQL via loaders.postgres_loader
+  8. Bulk upsert to PostgreSQL via DatabaseService (database_service.py)
 
 Geofencing Integration:
   The same area center + radius_km values are written to the

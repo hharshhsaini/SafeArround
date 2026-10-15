@@ -1,103 +1,79 @@
 # SafeAround Backend
 
-SafeAround Backend is the core API and worker service for the SafeAround platform. It provides geolocation services, emergency alerts, user management, and safety intelligence features.
+The Go API behind the SafeAround app: authentication, SOS alerts and dispatch to nearby users, push/SMS notifications, the crime heatmap, location, and safe routes.
 
 ## Tech Stack
 
-- **Language:** Go (Golang) 1.21+
-- **Framework:** Gin Web Framework
-- **Database:** PostgreSQL with PostGIS extension (for spatial queries)
-- **Cache:** Redis
-- **Architecture:** Clean Architecture principles
-- **External APIs:** Twilio Verify V2 (Authentication), Google Maps (Geocoding), Firebase (FCM)
+- **Language:** Go 1.25
+- **Framework:** Gin
+- **Database:** PostgreSQL with PostGIS
+- **Cache / rate limits / token revocation:** Redis
+- **External services:** Twilio (Verify OTPs and SMS), Expo push and FCM HTTP v1 (push), Google Maps (geocoding)
 
-## Authentication Flow
+## Authentication
 
-SafeAround utilizes a robust **Hybrid OTP/Password** authentication architecture:
-1. **Signup/Login via Phone:** Users enter their phone number to receive a secure 6-digit OTP via Twilio Verify API.
-2. **Session Generation:** Upon verification, the user is issued a secure JWT access & refresh token.
-3. **Password Configuration:** Once authenticated via OTP, users have the option to set a permanent password and bind an email.
-4. **Direct Login:** Returning users can choose to bypass the OTP flow if they've designated a password inside their profile.
+1. **Phone OTP:** the user gets a 6-digit code through Twilio Verify; verifying it returns an access token (15 minutes) and a refresh token (7 days, stored as a session).
+2. **Password:** after signing in with an OTP, a user can set a password and sign in with phone + password from then on.
+3. **Refresh / logout:** `/auth/refresh` rotates the refresh token; `/auth/logout` revokes the session and the current access token.
+4. **Forgot password:** `/auth/password/reset` takes the phone, an OTP and the new password, then signs the account out everywhere.
 
-## Prerequisites
+## Running Locally
 
-To run this project, you will need:
-- [Go](https://golang.org/doc/install) 1.21 or later
-- [Docker & Docker Compose](https://docs.docker.com/get-docker/) (for local database and Redis services)
-- [Make](https://www.gnu.org/software/make/) (optional, but recommended for automation)
-- [golangci-lint](https://golangci-lint.run/usage/install/) (for linting)
+```bash
+make setup   # copies .env.example to .env, downloads modules, starts Postgres + Redis in Docker
+make run     # or `make dev` for hot reload with Air
+```
 
-## Quick Start Guide
+The API listens on `http://localhost:8000` (`SERVER_PORT`). See [.env.example](.env.example) for every setting the code reads.
 
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/obsidiannnn/Safe-Around.git
-   cd Safe-Around/backend
-   ```
+## Database
 
-2. **Start external services (PostgreSQL & Redis):**
-   ```bash
-   make docker-up
-   ```
+- **App tables** come from the GORM models in `internal/models`, created by `database.RunMigrations` (`internal/database/migrations.go`). That call is currently commented out in `cmd/api/main.go`.
+- **Crime tables, the heatmap view and the live-update trigger** are applied by hand from [`database/triggers/realtime_crime_update.sql`](database/triggers/realtime_crime_update.sql).
+- **`migrations/`** holds golang-migrate files (`make migrate-up`). They are older than the models and no longer match them (for example, they create `users.password_hash` while the code uses `users.password`), so don't run them on a fresh database until they're brought up to date.
 
-3. **Install dependencies:**
-   ```bash
-   go mod download
-   ```
-
-4. **Run database migrations:**
-   ```bash
-   make migrate-up
-   ```
-
-5. **Start the development server:**
-   ```bash
-   make run
-   ```
-
-   The server will be available at `http://localhost:8080`.
-
-## Project Structure Overview
+## Project Structure
 
 ```
-safearound-backend/
+backend/
 ├── cmd/
-│   └── api/          # Main application entry point
+│   ├── api/                 # The API server (main entry point)
+│   └── worker/              # Background jobs (separate binary, Dockerfile.worker)
 ├── internal/
-│   ├── config/       # Configuration loading and validation
-│   ├── database/     # DB connections (PostgreSQL, Redis)
-│   ├── handlers/     # HTTP handlers / controllers (Gin)
-│   ├── middleware/   # Custom HTTP midlewares (Auth, Logging)
-│   ├── models/       # Data structures and domain models
-│   ├── repository/   # Data access layer
-│   ├── services/     # Core business logic
-│   └── utils/        # Shared helper functions
-├── pkg/              # Public libraries (can be used by other projects)
-├── scripts/          # Build, config, deployment scripts
-├── migrations/       # SQL database migrations
-├── tests/            # Integration and E2E tests
-├── docs/             # Swagger and API documentation
+│   ├── config/              # Loads .env settings
+│   ├── database/            # Postgres, Redis and GORM schema setup
+│   ├── handlers/            # HTTP handlers (Gin)
+│   ├── middleware/          # Auth, CORS, rate limits, metrics, security headers
+│   ├── models/              # GORM models
+│   ├── monitoring/          # Prometheus metrics
+│   ├── repository/          # User and session data access
+│   ├── routes/              # Route table
+│   ├── services/            # Business logic (alerts, notifications, location, routes...)
+│   ├── utils/               # JWT, passwords, phone numbers
+│   └── websocket/           # Real-time hub for /ws/crime
+├── pkg/                     # Clients for FCM/Expo push, Twilio, Google Maps; the logger
+├── database/triggers/       # Hand-applied SQL (crime tables, heatmap view, trigger)
+├── migrations/              # golang-migrate files (see Database above)
+├── scripts/                 # Developer tools, run from backend/:
+│   ├── migrate.sh           #   ./scripts/migrate.sh up|down|version|refresh-mv|status
+│   ├── check_user/          #   go run ./scripts/check_user
+│   ├── create_test_user/    #   go run ./scripts/create_test_user
+│   ├── test_login/          #   go run ./scripts/test_login <phone> <password>
+│   ├── test_notification/   #   go run ./scripts/test_notification <push_token>
+│   └── send_test_otp/       #   go run ./scripts/send_test_otp <phone>
+└── tests/                   # API-level tests (unit tests live next to their packages)
 ```
 
-## Development Setup
-
-For a frictionless development experience, you can use **[Air](https://github.com/cosmtrek/air)** for hot-reloading:
+## Tests and Checks
 
 ```bash
-go install github.com/cosmtrek/air@latest
-air
+make test       # go test ./...
+make vet        # go vet ./...
+make coverage   # tests with a per-function coverage report
 ```
 
-Make sure you copy the environment template:
-```bash
-cp .env.example .env
-```
-And adjust the `.env` variables according to your local setup.
-
-## API Documentation
-
-*(Coming Soon)* - Swagger API documentation will be available at `/swagger/index.html` when running locally.
+The logout token-revocation test needs Redis; it is skipped unless `TEST_REDIS_ADDR` is set (e.g. `TEST_REDIS_ADDR=localhost:6379 make test`). CI runs all of this on every push and pull request.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+MIT, see [LICENSE](LICENSE).

@@ -64,7 +64,15 @@ func main() {
 	logger.Info("redis connected")
 
 	// 3. External Integrations
-	fcmClient := fcm.NewClient(os.Getenv("FCM_SERVER_KEY"))
+	// Expo push tokens work without FCM credentials, so a bad key degrades
+	// rather than stopping the server.
+	fcmClient, err := fcm.NewClient(os.Getenv("FCM_SERVICE_ACCOUNT_JSON"))
+	if err != nil {
+		logger.Error("FCM_SERVICE_ACCOUNT_JSON is invalid; only Expo push tokens will be delivered", zap.Error(err))
+		fcmClient, _ = fcm.NewClient("")
+	} else if os.Getenv("FCM_SERVICE_ACCOUNT_JSON") == "" {
+		logger.Warn("FCM_SERVICE_ACCOUNT_JSON is not set; only Expo push tokens will be delivered")
+	}
 	twilioClient := twilio.NewClient(os.Getenv("TWILIO_ACCOUNT_SID"), os.Getenv("TWILIO_AUTH_TOKEN"))
 	
 	// Initialize Google Maps client for location search
@@ -80,7 +88,6 @@ func main() {
 	crimeHub := customWS.NewCrimeHub(dbPool)
 
 	alertSvc := services.NewAlertService(db, rdb, geoSvc, notifSvc, crimeHub)
-	_ = services.NewHeatmapService(db, rdb, nil) // keep heatmap tile service available if needed
 	locationSvc := services.NewLocationService(db, rdb, geoSvc)
 	routeSvc := services.NewRouteService(db, rdb)
 	feedbackSvc := services.NewFeedbackService(db)
@@ -92,7 +99,7 @@ func main() {
 	alertHandler := handlers.NewAlertHandler(alertSvc)
 	heatmapHandler := handlers.NewHeatmapHandler(db, rdb)
 	wsHandler := handlers.HandleWebSocket(crimeHub)
-	locationHandler := handlers.NewLocationHandler(locationSvc, crimeHub)
+	locationHandler := handlers.NewLocationHandler(locationSvc)
 	locationSearchHandler := handlers.NewLocationSearchHandler(mapsClient)
 	routeHandler := handlers.NewRouteHandler(routeSvc)
 	profileHandler := handlers.NewProfileHandler(db, rdb)

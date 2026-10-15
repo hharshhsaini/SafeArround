@@ -74,11 +74,11 @@ func (h *GeofencingHandler) GetNearbyUsers(c *gin.Context) {
 		return
 	}
 
+	// Only the count is returned; user records would expose names and phone numbers.
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data": gin.H{
 			"count": len(users),
-			"users": users,
 		},
 	})
 }

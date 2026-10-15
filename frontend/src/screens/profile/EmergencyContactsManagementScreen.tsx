@@ -15,16 +15,22 @@ import { spacing, borderRadius } from '@/theme/spacing';
 import { fontSizes } from '@/theme/typography';
 import { profileApiService } from '@/services/api/profileApiService';
 import { useUserStore } from '@/store/userStore';
+import { DeviceContactsPickerModal } from '@/components/profile/DeviceContactsPickerModal';
+import { DeviceContactOption } from '@/services/deviceContactsService';
+import { normalizePhoneNumber } from '@/utils/phone';
+
+const MAX_CONTACTS = 5;
 
 /**
  * Emergency contacts management screen
- * Allows viewing, adding, and deleting emergency contacts
+ * Allows viewing, adding (typed in or imported from the phone), and deleting emergency contacts
  */
 export const EmergencyContactsManagementScreen = () => {
   const navigation = useNavigation();
   const { setEmergencyContacts } = useUserStore();
   const [contacts, setContacts] = useState<EmergencyContact[]>([]);
   const [showForm, setShowForm] = useState(false);
+  const [showPicker, setShowPicker] = useState(false);
   const [isPrimary, setIsPrimary] = useState(false);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -62,8 +68,34 @@ export const EmergencyContactsManagementScreen = () => {
     }
   };
 
+  const onImportContacts = async (selected: DeviceContactOption[]) => {
+    const toAdd = selected.slice(0, MAX_CONTACTS - contacts.length);
+    const failed: string[] = [];
+
+    for (const [index, contact] of toAdd.entries()) {
+      try {
+        await profileApiService.addContact({
+          name: contact.name,
+          phone: contact.normalizedPhone,
+          relationship: 'Trusted contact',
+          is_priority: contacts.length === 0 && index === 0,
+        });
+      } catch (error) {
+        console.error('Failed to import contact:', error);
+        failed.push(contact.name);
+      }
+    }
+
+    await loadContacts();
+    if (failed.length > 0) {
+      RNAlert.alert('Some contacts were not added', `Could not add: ${failed.join(', ')}`);
+    } else {
+      RNAlert.alert('Success', `${toAdd.length} emergency contact${toAdd.length === 1 ? '' : 's'} added`);
+    }
+  };
+
   const onAddContact = async (data: EmergencyContactFormData) => {
-    if (contacts.length >= 5) {
+    if (contacts.length >= MAX_CONTACTS) {
       RNAlert.alert('Limit Reached', 'You can only have up to 5 emergency contacts');
       return;
     }
@@ -267,26 +299,46 @@ export const EmergencyContactsManagementScreen = () => {
           </Card>
         )}
 
-        {!showForm && contacts.length < 5 && (
-          <Button
-            variant="primary"
-            size="large"
-            fullWidth
-            icon="add"
-            onPress={() => setShowForm(true)}
-            style={styles.addButton}
-          >
-            Add Emergency Contact
-          </Button>
+        {!showForm && contacts.length < MAX_CONTACTS && (
+          <>
+            <Button
+              variant="primary"
+              size="large"
+              fullWidth
+              icon="contacts"
+              onPress={() => setShowPicker(true)}
+              style={styles.addButton}
+            >
+              Choose from Phone Contacts
+            </Button>
+            <Button
+              variant="outline"
+              size="large"
+              fullWidth
+              icon="add"
+              onPress={() => setShowForm(true)}
+              style={styles.addButton}
+            >
+              Type a Number Instead
+            </Button>
+          </>
         )}
 
-        {contacts.length >= 5 && (
+        {contacts.length >= MAX_CONTACTS && (
           <Alert
             type="warning"
             message="Maximum limit reached. You can have up to 5 emergency contacts."
           />
         )}
       </ScrollView>
+
+      <DeviceContactsPickerModal
+        visible={showPicker}
+        existingPhones={contacts.map((contact) => normalizePhoneNumber(contact.phoneNumber || contact.phone || ''))}
+        maxSelectable={MAX_CONTACTS - contacts.length}
+        onClose={() => setShowPicker(false)}
+        onImport={onImportContacts}
+      />
     </SafeAreaView>
   );
 };

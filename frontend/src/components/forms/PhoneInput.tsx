@@ -23,7 +23,9 @@ export const PhoneInput: React.FC<PhoneInputProps> = ({
   onChangeText,
   label,
   error,
-  countryCode = '+1',
+  // India by default, matching the backend: with +1 a 10-digit Indian number
+  // was reformatted as "(987) 654-3210" and failed validation.
+  countryCode = '+91',
   onCountryCodeChange,
 }) => {
   const [isFocused, setIsFocused] = useState(false);

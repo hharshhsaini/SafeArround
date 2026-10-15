@@ -13,12 +13,13 @@ type ResetStep = 'phone' | 'otp' | 'password';
 /**
  * Password reset with 3-step OTP flow matching backend:
  * Step 1: Enter phone → POST /auth/otp/send
- * Step 2: Verify OTP  → POST /auth/otp/verify (logs in, gets token)
- * Step 3: New password → POST /auth/password/setup (using the token)
+ * Step 2: Enter OTP   → kept on the device (a code can only be checked once)
+ * Step 3: New password → POST /auth/password/reset with phone, OTP and password
+ * The user then signs in with the new password.
  */
 export const PasswordResetScreen = () => {
   const navigation = useNavigation();
-  const { sendOTP, verifyOTP, setupProfile, error, clearError } = useAuth();
+  const { sendOTP, resetPassword, error, clearError } = useAuth();
 
   const [step, setStep] = useState<ResetStep>('phone');
   const [phone, setPhone] = useState('');
@@ -42,19 +43,10 @@ export const PasswordResetScreen = () => {
     }
   };
 
-  const handleVerifyOTP = async () => {
+  const handleContinueWithOTP = () => {
     if (otp.length !== 6) return;
-    try {
-      setIsSubmitting(true);
-      clearError();
-      // This logs in the user and sets the access token in the store
-      await verifyOTP(phone, otp);
-      setStep('password');
-    } catch (err) {
-      // error handled by store
-    } finally {
-      setIsSubmitting(false);
-    }
+    clearError();
+    setStep('password');
   };
 
   const handleResetPassword = async () => {
@@ -62,12 +54,15 @@ export const PasswordResetScreen = () => {
     try {
       setIsSubmitting(true);
       clearError();
-      // Use the token from verifyOTP to set new password (name/email kept blank for reset)
-      await setupProfile({ name: '', email: '', password: newPassword });
+      await resetPassword(phone, otp, newPassword);
       setSuccess(true);
       setTimeout(() => navigation.navigate('Login' as never), 2000);
-    } catch (err) {
-      // error handled by store
+    } catch (err: any) {
+      // The code is only checked now, so send the user back to re-enter it.
+      if (err?.response?.status === 401) {
+        setOtp('');
+        setStep('otp');
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -122,8 +117,8 @@ export const PasswordResetScreen = () => {
                 keyboardType="number-pad"
                 autoFocus
               />
-              <Button variant="primary" size="large" fullWidth onPress={handleVerifyOTP} loading={isSubmitting}>
-                Verify OTP
+              <Button variant="primary" size="large" fullWidth onPress={handleContinueWithOTP} disabled={otp.length !== 6}>
+                Continue
               </Button>
               <Button variant="ghost" size="medium" fullWidth onPress={handleSendOTP}>
                 Resend Code

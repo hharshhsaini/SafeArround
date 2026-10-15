@@ -93,9 +93,16 @@ export const ResponderAlertModal: React.FC<ResponderAlertModalProps> = ({
       await respondToAlert(alert.id);
       accepted = true;
     } catch (error: any) {
-      const is409 = error?.response?.status === 409 || error?.status === 409;
-      if (is409) {
+      const code = error?.response?.data?.code;
+      if (code === 'already_accepted') {
+        // A repeat tap: this responder is already on the way.
         accepted = true;
+      } else if (code === 'alert_inactive') {
+        // Never send someone to an alert that has been resolved or cancelled.
+        setIsResponding(false);
+        NativeAlert.alert('Alert has ended', 'This person no longer needs help.', [{ text: 'OK' }]);
+        onClose();
+        return;
       } else {
         console.warn('Error responding to alert:', error);
       }

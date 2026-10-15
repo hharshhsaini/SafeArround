@@ -110,9 +110,10 @@ export const EmergencyResolutionScreen = () => {
 
       // Submit feedback if user provided any
       if (rating > 0 || summaryNote.trim() || feedback.trim() || wasHelpful !== null) {
-        // Get responder ID from the first responder if available
-        const responderId = details?.responders?.[0]?.userId 
-          ? parseInt(details.responders[0].userId, 10) 
+        // Rate the first responder only if the user actually picked stars;
+        // otherwise the default below would count as a 3-star rating for them.
+        const responderId = rating > 0 && details?.responders?.[0]?.userId
+          ? parseInt(details.responders[0].userId, 10)
           : undefined;
 
         await feedbackService.submitFeedback({
