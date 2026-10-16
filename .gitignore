@@ -42,6 +42,7 @@ __pycache__/
 # IDE
 .vscode/
 .idea/
+.kiro/
 
 # Logs
 *.log
